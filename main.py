@@ -740,9 +740,11 @@ class TradingBot:
             equity = self.exchange.account_value()
         except ExecutionError as e:
             logger.error("[仓位] 读取权益失败 | err=%s", e)
+            self._reset_idle_counters()
             return
         if equity <= 0:
             logger.error("[仓位] 账户权益非法 | equity=%s", equity)
+            self._reset_idle_counters()
             return
 
         # 第一步：调用 RiskManager 获取稳健名义仓位 (固定风险比例 Fixed Fractional + ATR真实止损距离反推)
@@ -1495,12 +1497,15 @@ class TradingBot:
             return
         try:
             df_5m = self.market.get_ohlcv("5m", 120)
-            atr_14 = utils.atr(df_5m["high"], df_5m["low"], df_5m["close"], 14)
-            self.cached_atr_5m = atr_14
+            calc_atr = utils.atr(df_5m["high"], df_5m["low"], df_5m["close"], 14)
+            if calc_atr is not None and math.isfinite(calc_atr) and calc_atr > 0:
+                atr_14 = float(calc_atr)
+            else:
+                atr_14 = max(entry_px * 0.01, 1e-4)
         except Exception as e:
             logger.warning("[对账] 拉取 5m ATR 失败 | action=使用保守止损 | err=%s", e)
-            atr_14 = entry_px * 0.01
-            self.cached_atr_5m = atr_14
+            atr_14 = max(entry_px * 0.01, 1e-4)
+        self.cached_atr_5m = atr_14
 
         self.exchange.adopt_open_position(szi, entry_px)
         sl_px = self.exchange._ai_sl_price
@@ -1559,7 +1564,7 @@ class TradingBot:
             logger.info("[对账] 继承已持久化持仓风控元数据 | init_r=%.2f | peak=%.2f | bars_held=%d",
                         init_r, pk, b_held)
         else:
-            init_r = max(abs(entry_px - float(sl_px)), atr_14 * 0.5, entry_px * 0.002)
+            init_r = max(abs(entry_px - float(sl_px)), atr_14 * 0.5, entry_px * 0.002, 1e-4)
             pk = mark or entry_px
             b_held = 0
             o_at = time.time()
@@ -1578,8 +1583,20 @@ class TradingBot:
         try:
             if hasattr(self, 'risk_mgr') and self.risk_mgr:
                 self.risk_mgr.confirm_position(self.coin, self.position.initial_risk_r)
+            if hasattr(self, 'router') and self.router:
+                from multi_coin_router import CoinSignal
+                sig = CoinSignal(
+                    coin=self.coin,
+                    score=75.0,
+                    direction=direction,
+                    price=entry_px,
+                    tp=float(tp_px),
+                    sl=float(sl_px),
+                    entry_score=75.0,
+                )
+                self.router.register_position(sig)
         except Exception as re:
-            logger.debug("[风控] 对账挂载登记仓位异常: %s", re)
+            logger.debug("[风控/路由] 对账挂载登记仓位异常: %s", re)
         self.position_entry_price = entry_px
         self.position_direction = direction
         self.open_regime_cap = regime_sl_cap(self.final_macro_state) or 1.5

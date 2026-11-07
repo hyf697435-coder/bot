@@ -1351,14 +1351,14 @@ def update_position_fsm(position: Position, current_price: float,
         # 3. 动态追踪止损 (优先判定，避免被保本逻辑覆盖)
         if profit_r > TRAIL_START_R and valid_atr > 0:
             trail = position.peak_price - TRAIL_ATR_MULT * valid_atr
-            # 单向棘轮：严格只向上收紧，绝不回退
-            if position.sl_price is None or trail > position.sl_price:
+            # 单向棘轮：严格只向上收紧，绝不回退，且不得已被现价击穿
+            if (position.sl_price is None or trail > position.sl_price) and trail < current_price:
                 position.sl_price = trail
                 position.is_breakeven_set = True
-        # 4. 保本单: 浮盈 >= 1.0R (仅触发一次状态锁，且单向收紧)
+        # 4. 保本单: 浮盈 >= 1.0R (仅触发一次状态锁，且单向收紧，且不得已被现价击穿)
         elif profit_r >= BREAK_EVEN_R and not getattr(position, "is_breakeven_set", False):
             be = position.entry_price * (1.0 + BREAK_EVEN_MARGIN)
-            if position.sl_price is None or be > position.sl_price:
+            if (position.sl_price is None or be > position.sl_price) and be < current_price:
                 position.sl_price = be
                 position.is_breakeven_set = True
 
@@ -1383,14 +1383,14 @@ def update_position_fsm(position: Position, current_price: float,
     # 3. 动态追踪止损 (优先判定)
     if profit_r > TRAIL_START_R and valid_atr > 0:
         trail = position.peak_price + TRAIL_ATR_MULT * valid_atr
-        # 单向棘轮：做空严格只向下收紧，绝不回退
-        if position.sl_price is None or trail < position.sl_price:
+        # 单向棘轮：做空严格只向下收紧，绝不回退，且不得已被现价击穿
+        if (position.sl_price is None or trail < position.sl_price) and trail > current_price:
             position.sl_price = trail
             position.is_breakeven_set = True
     # 4. 保本单: 浮盈 >= 1.0R
     elif profit_r >= BREAK_EVEN_R and not getattr(position, "is_breakeven_set", False):
         be = position.entry_price * (1.0 - BREAK_EVEN_MARGIN)
-        if position.sl_price is None or be < position.sl_price:
+        if (position.sl_price is None or be < position.sl_price) and be > current_price:
             position.sl_price = be
             position.is_breakeven_set = True
 

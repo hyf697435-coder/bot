@@ -210,6 +210,7 @@ class MultiCoinRouter:
         self.current_position: Optional[CoinSignal] = None
         self.switch_threshold = self.config.get("multi_coin", {}).get("switch_threshold_delta", 10)
         self.corr_penalty_threshold = self.config.get("multi_coin", {}).get("correlation_penalty_threshold", 0.7)
+        self._lock = threading.RLock()
         self.latest_radar_scores: Dict[str, dict] = {}
         self.latest_coin_prices: Dict[str, float] = {}
 
@@ -431,15 +432,21 @@ class MultiCoinRouter:
                 logger.error(f"[MultiCoin] 并发扫描 {c} 异常: {e}")
                 return None
 
-        with ThreadPoolExecutor(max_workers=max(1, min(len(self.coins), 4))) as executor:
-            signals_raw = list(executor.map(_eval, self.coins))
+        try:
+            with ThreadPoolExecutor(max_workers=max(1, min(len(self.coins), 4))) as executor:
+                signals_raw = list(executor.map(_eval, self.coins, timeout=45.0))
+        except Exception as e:
+            logger.error(f"[MultiCoin] 并发扫描执行超时或异常: {e}")
+            signals_raw = []
 
-        with collector_lock:
+        with self._lock:
             self.latest_radar_scores.update(radar_scores_collector)
             self.latest_coin_prices.update(coin_prices_collector)
+            scores_copy = self.latest_radar_scores.copy()
+            prices_copy = self.latest_coin_prices.copy()
 
         valid_signals = [s for s in signals_raw if s is not None]
-        return valid_signals, self.latest_radar_scores.copy(), self.latest_coin_prices.copy()
+        return valid_signals, scores_copy, prices_copy
 
     def _collect_coin_signals(self, calculate_signal_fn, calculate_trs_fn, macro_state) -> List[CoinSignal]:
         """收集并评估所有币种的候选信号"""
@@ -479,7 +486,8 @@ class MultiCoinRouter:
 
     def register_position(self, signal: CoinSignal):
         """注册新持仓"""
-        self.current_position = signal
+        with self._lock:
+            self.current_position = signal
         logger.info(
             f"[MultiCoin] 注册持仓 | {signal.coin} | "
             f"方向={signal.direction} | 分数={signal.score:.1f} | 价格={signal.price:.2f}"
@@ -487,9 +495,10 @@ class MultiCoinRouter:
     
     def clear_position(self):
         """清除持仓记录"""
-        if self.current_position:
-            logger.info(f"[MultiCoin] 清除持仓 | {self.current_position.coin}")
-        self.current_position = None
+        with self._lock:
+            if self.current_position:
+                logger.info(f"[MultiCoin] 清除持仓 | {self.current_position.coin}")
+            self.current_position = None
     
     def get_correlation_report(self) -> str:
         """生成相关性报告"""

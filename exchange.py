@@ -881,9 +881,10 @@ class HyperliquidExecutor:
         hard_sl = float(hard_sl) if hard_sl and float(hard_sl) > 0 else None
 
         if final_sl:
+            oid = self._place_trigger("sl", final_sl)
             self._ai_sl_price = final_sl
-            oids["sl"] = self._place_trigger("sl", final_sl)
-            self._ai_sl_oid = oids["sl"]
+            self._ai_sl_oid = oid
+            oids["sl"] = oid
 
         if hard_sl:
             too_close = final_sl is not None and abs(hard_sl - final_sl) / max(abs(final_sl), 1e-9) < 1e-4
@@ -899,9 +900,10 @@ class HyperliquidExecutor:
                 logger.info("[执行] 硬止损与主止损过近 | 硬止损=%.2f | action=仅保留主止损", hard_sl)
             else:
                 try:
+                    h_oid = self._place_trigger("sl", hard_sl)
                     self._hard_sl_price = hard_sl
-                    oids["hard"] = self._place_trigger("sl", hard_sl)
-                    self._hard_sl_oid = oids["hard"]
+                    self._hard_sl_oid = h_oid
+                    oids["hard"] = h_oid
                 except ExecutionError as e:
                     self._hard_sl_price = None
                     self._hard_sl_oid = None
@@ -912,9 +914,10 @@ class HyperliquidExecutor:
             try:
                 tp_f = float(take_profit)
                 if math.isfinite(tp_f) and tp_f > 0:
+                    tp_oid = self._place_trigger("tp", tp_f)
                     self._tp_price = tp_f
-                    oids["tp"] = self._place_trigger("tp", tp_f)
-                    self._tp_oid = oids["tp"]
+                    self._tp_oid = tp_oid
+                    oids["tp"] = tp_oid
             except (ValueError, TypeError, ExecutionError) as e:
                 logger.warning("[执行] 挂载止盈单异常: %s", e)
         return oids
@@ -927,9 +930,27 @@ class HyperliquidExecutor:
         """
         if not self.ready or new_hard_stop is None or float(new_hard_stop) <= 0:
             return None
-        if not self._position_size or self._position_size <= 0:
-            return None
         new_hard_stop = float(new_hard_stop)
+
+        try:
+            szi, _ = self.current_position()
+            if szi is None or abs(szi) <= 0:
+                logger.debug("[执行] refresh_hard_stop 时已无持仓 | action=跳过刷新")
+                return None
+            self._position_size = abs(szi)
+            self._position_direction = "LONG" if szi > 0 else "SHORT"
+        except Exception as e:
+            logger.warning("[执行] refresh_hard_stop 查仓异常 | err=%s", e)
+            return None
+
+        # 单向棘轮防御：做多绝不向下放宽，做空绝不向上放宽
+        if self._hard_sl_price is not None and math.isfinite(self._hard_sl_price):
+            if self._position_direction == "LONG" and new_hard_stop < self._hard_sl_price - 1e-6:
+                logger.debug("[执行] 做多硬止损违背单向棘轮 | new=%.2f < old=%.2f | 拒绝放宽", new_hard_stop, self._hard_sl_price)
+                return self._hard_sl_price
+            elif self._position_direction == "SHORT" and new_hard_stop > self._hard_sl_price + 1e-6:
+                logger.debug("[执行] 做空硬止损违背单向棘轮 | new=%.2f > old=%.2f | 拒绝放宽", new_hard_stop, self._hard_sl_price)
+                return self._hard_sl_price
 
         try:
             mark = self.mark_price()
