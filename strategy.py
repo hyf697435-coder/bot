@@ -54,6 +54,7 @@ import math
 import os
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from typing import List, Optional, Tuple, Union
 
@@ -1246,16 +1247,44 @@ class Position:
     is_breakeven_set: bool = False  # 保本状态锁：单笔持仓周期内仅触发一次，避免重复计算与改单扰动
 
     def __post_init__(self):
-        if self.peak_price <= 0:
+        # 防御 entry_price 与 peak_price
+        try:
+            self.entry_price = float(self.entry_price)
+        except (ValueError, TypeError):
+            self.entry_price = 0.0
+
+        if getattr(self, "peak_price", 0.0) <= 0 or not math.isfinite(self.peak_price):
             self.peak_price = self.entry_price
-        if self.initial_risk_r <= 0:
-            self.initial_risk_r = max(abs(self.entry_price - self.sl_price), 1e-9)
+
+        # 防御 initial_risk_r 为 0 / 负 / NaN
+        ir = getattr(self, "initial_risk_r", 0.0)
+        if ir is None or not math.isfinite(ir) or ir <= 1e-9:
+            try:
+                sl = float(getattr(self, "sl_price", 0.0) or 0.0)
+                self.initial_risk_r = max(abs(self.entry_price - sl), abs(self.entry_price) * 1e-3, 1e-6)
+            except Exception:
+                self.initial_risk_r = max(abs(self.entry_price) * 1e-3, 1e-6)
+
+        # 统一 opened_at 为 float 时间戳，兼容 datetime 实例输入
+        if hasattr(self, "opened_at"):
+            if isinstance(self.opened_at, datetime):
+                self.opened_at = float(self.opened_at.timestamp())
+            else:
+                try:
+                    self.opened_at = float(self.opened_at)
+                except (ValueError, TypeError):
+                    self.opened_at = time.time()
 
     def profit_r(self, current_price: float) -> float:
-        """以 R 为单位的当前浮动盈亏 (带符号)。"""
-        if self.direction == "LONG":
-            return (current_price - self.entry_price) / max(self.initial_risk_r, 1e-9)
-        return (self.entry_price - current_price) / max(self.initial_risk_r, 1e-9)
+        """以 R 为单位的当前浮动盈亏 (带符号)。防御除零与 NaN。"""
+        if not (math.isfinite(current_price) and current_price > 0):
+            return 0.0
+        ir = getattr(self, "initial_risk_r", 0.0)
+        if ir is None or not math.isfinite(ir) or ir <= 1e-9:
+            ir = max(abs(self.entry_price - getattr(self, "sl_price", 0.0)), abs(self.entry_price) * 1e-3, 1e-6)
+        diff = (current_price - self.entry_price) if self.direction == "LONG" else (self.entry_price - current_price)
+        res = diff / max(ir, 1e-6)
+        return float(res) if math.isfinite(res) else 0.0
 
 
 def update_position_fsm(position: Position, current_price: float,
@@ -1275,10 +1304,14 @@ def update_position_fsm(position: Position, current_price: float,
         return "HOLD"
     valid_atr = float(current_atr) if (current_atr is not None and math.isfinite(current_atr) and current_atr > 0) else 0.0
 
-    # 动态推进 bars_held，防止跨进程或丢帧导致有状态计数遗漏
-    if hasattr(position, "opened_at") and position.opened_at and position.opened_at > 0:
-        elapsed_bars = int((time.time() - position.opened_at) // 300)
-        position.bars_held = max(position.bars_held, elapsed_bars)
+    # 动态推进 bars_held，防止跨进程或丢帧导致有状态计数遗漏 (兼容 opened_at 为 float/datetime)
+    if hasattr(position, "opened_at") and position.opened_at:
+        try:
+            o_ts = position.opened_at.timestamp() if isinstance(position.opened_at, datetime) else float(position.opened_at)
+            elapsed_bars = int((time.time() - o_ts) // 300)
+            position.bars_held = max(position.bars_held, elapsed_bars)
+        except Exception:
+            pass
 
     if position.direction == "LONG":
         # 1. 硬止盈 / 硬止损

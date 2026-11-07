@@ -874,6 +874,12 @@ class HyperliquidExecutor:
         if hard_sl:
             too_close = final_sl is not None and abs(hard_sl - final_sl) / max(abs(final_sl), 1e-9) < 1e-4
             if too_close:
+                # 之前若有硬止损单残留，必须撤销，防止孤儿挂单
+                if getattr(self, "_hard_sl_oid", None):
+                    try:
+                        self._cancel_order(self._hard_sl_oid)
+                    except Exception as ce:
+                        logger.warning("[执行] 撤销过近旧硬止损单异常 | oid=%s | err=%s", self._hard_sl_oid, ce)
                 self._hard_sl_price = None
                 self._hard_sl_oid = None
                 logger.info("[执行] 硬止损与主止损过近 | 硬止损=%.2f | action=仅保留主止损", hard_sl)
@@ -1082,14 +1088,16 @@ class HyperliquidExecutor:
     def tighten_stop(self, new_stop_loss: float, new_take_profit: Optional[float] = None,
                      min_interval_seconds: float = 10.0) -> Optional[dict]:
         """
-        先撤旧主止损，再挂新主止损 (FSM 保本/追踪移损调用)。
-        新单失败时回挂旧止损，拒绝裸奔。硬止损与止盈保持原单。
-        加入时间间隔节流校验 (默认 10 秒)。
+        先挂新主止损，再撤旧主止损 (FSM 保本/追踪移损调用)。
+        具备：
+        1. 严格单向棘轮校验 (做多绝不向下放宽，做空绝不向上放宽)；
+        2. 市价击穿校验 (新止损绝不能已被当前市价穿透，防止挂出立即成交)；
+        3. 节流与状态强一致。
         """
         if not self.ready:
             self._fail("止损通道未就绪，拒绝移损。")
             return None
-        if new_stop_loss is None or float(new_stop_loss) <= 0:
+        if new_stop_loss is None or not math.isfinite(float(new_stop_loss)) or float(new_stop_loss) <= 0:
             self._fail(f"非法的新止损价: {new_stop_loss}")
             return None
 
@@ -1100,15 +1108,38 @@ class HyperliquidExecutor:
 
         try:
             szi, _ = self.current_position()
-            if abs(szi) <= 0:
+            if szi is None or abs(szi) <= 0:
                 self._fail("当前无持仓，拒绝移损。")
                 return None
             self._position_size = abs(szi)
-            self._position_direction = "LONG" if szi > 0 else "SHORT"
+            direction = "LONG" if szi > 0 else "SHORT"
+            self._position_direction = direction
 
             new_sl = float(new_stop_loss)
             old_sl_oid = self._ai_sl_oid
             old_sl_price = self._ai_sl_price
+
+            # 1. 严格单向棘轮防御 (防止策略计算波动导致止损不利移动)
+            if old_sl_price is not None and math.isfinite(old_sl_price):
+                if direction == "LONG" and new_sl < old_sl_price - 1e-6:
+                    logger.warning("[执行] 做多移损违背单向棘轮 | new_sl=%.2f < old_sl=%.2f | 拒绝放宽", new_sl, old_sl_price)
+                    return None
+                elif direction == "SHORT" and new_sl > old_sl_price + 1e-6:
+                    logger.warning("[执行] 做空移损违背单向棘轮 | new_sl=%.2f > old_sl=%.2f | 拒绝放宽", new_sl, old_sl_price)
+                    return None
+
+            # 2. 市价穿透防御 (防止新止损挂在已被击穿的价格上导致立即市价成交)
+            try:
+                mark_px = self.mark_price()
+                if direction == "LONG" and new_sl >= mark_px:
+                    logger.warning("[执行] 新止损已被现价击穿 | new_sl=%.2f >= mark=%.2f | action=跳过移损挂单", new_sl, mark_px)
+                    return None
+                elif direction == "SHORT" and new_sl <= mark_px:
+                    logger.warning("[执行] 新止损已被现价击穿 | new_sl=%.2f <= mark=%.2f | action=跳过移损挂单", new_sl, mark_px)
+                    return None
+            except Exception as pe:
+                logger.warning("[执行] 移损校验标记价异常 | err=%s | 保守继续挂单", pe)
+
             # 先挂载新 SL 触发单，成功后再撤销旧 SL 单，彻底杜绝裸奔窗口
             new_sl_oid = self._place_trigger("sl", new_sl)
             if old_sl_oid:
@@ -1120,7 +1151,7 @@ class HyperliquidExecutor:
             self._ai_sl_oid = new_sl_oid
             self._last_tighten_time = time.monotonic()
 
-            if new_take_profit and float(new_take_profit) > 0:
+            if new_take_profit and float(new_take_profit) > 0 and math.isfinite(float(new_take_profit)):
                 new_tp = float(new_take_profit)
                 if self._tp_price is None or abs(new_tp - float(self._tp_price)) / max(abs(self._tp_price), 1e-9) > 1e-6:
                     old_tp_oid = self._tp_oid

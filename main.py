@@ -868,16 +868,31 @@ class TradingBot:
 
         _, avg_px = HyperliquidExecutor._extract_filled(resp)
         entry = avg_px
-        if entry is None:
+        if entry is None or not math.isfinite(entry) or entry <= 0:
             try:
                 entry = self.exchange.mark_price()
             except Exception:
                 entry = None
-        if entry is None:
-            logger.warning("[开仓] 成交均价缺失 | action=以本地止损推导记账基准")
-            entry = final_sl * 1.01 if direction == "LONG" else final_sl * 0.99
+        if entry is None or not math.isfinite(entry) or entry <= 0:
+            try:
+                _, cur_entry = self.exchange.current_position()
+                if cur_entry and math.isfinite(cur_entry) and cur_entry > 0:
+                    entry = float(cur_entry)
+            except Exception:
+                entry = None
 
-        risk_r = max(abs(entry - final_sl), 1e-6)
+        if entry is None or not math.isfinite(entry) or entry <= 0:
+            logger.error("[开仓] 无法确定有效成交均价 | action=放弃盲目记账，发起对账接管")
+            send_alert("开仓成交但均价无法确定，启动紧急对账接管！")
+            self._reconcile_exchange_position()
+            return
+
+        risk_dist = abs(entry - final_sl)
+        if not math.isfinite(risk_dist) or risk_dist <= 1e-6:
+            logger.warning("[开仓] 止损距离异常 (%.6f) | 采用 ATR 保护距离兜底", risk_dist)
+            risk_dist = max(atr_14 * 0.5, entry * 0.002, 1e-4)
+
+        risk_r = risk_dist
         sz_qty = (sz_notional / entry) if entry > 0 else 0.0
         self.position = Position(
             entry_price=entry,
@@ -888,10 +903,11 @@ class TradingBot:
             initial_risk_r=risk_r,
             peak_price=entry,
             bars_held=0,
+            opened_at=time.time(),
         )
         try:
             if hasattr(self, 'risk_mgr') and self.risk_mgr:
-                self.risk_mgr.register_position(self.coin, self.position.initial_risk_r)
+                self.risk_mgr.confirm_position(self.coin, self.position.initial_risk_r)
             if hasattr(self, 'router') and self.router:
                 from multi_coin_router import CoinSignal
                 sig = getattr(self, "_active_candidate_signal", None)
@@ -944,7 +960,7 @@ class TradingBot:
                 logger.warning("[对账] 交易所已无持仓 | 判定=风控单成交/外部平仓 | action=清理挂单并结算离场")
                 send_alert("检测到交易所侧已无持仓，已清理残留挂单并结算离场。")
                 self._settle_external_close()
-                time.sleep(TRADING_POLL_SECONDS)
+                self._safe_sleep(TRADING_POLL_SECONDS, phase="TRADING_POLL", step=0.5)
                 return
 
         # 2. 轻量标记价 (1s 轮询): 屏蔽单次 REST 网络抖动, 避免瞬时超时误触发连续异常保护
@@ -952,7 +968,7 @@ class TradingBot:
             price = self.exchange.mark_price()
         except Exception as e:
             logger.warning("[持仓] 获取标记价瞬时失败 | err=%s | action=本轮跳过", e)
-            time.sleep(TRADING_POLL_SECONDS)
+            self._safe_sleep(TRADING_POLL_SECONDS, phase="TRADING_POLL", step=0.5)
             return
 
         # 3. ATR / 5m K 线缓存刷新 (低频) + bars_held 推进 (5m K 线边界)
@@ -985,20 +1001,40 @@ class TradingBot:
 
         if action == "CLOSE_SL":
             # 交易所侧已挂载真实止损单，默认等待交易所撮合引擎毫秒级处理；
-            # 【保留灾难兜底止损】：只有当价格穿透原定止损位超过 0.5 * ATR (或亏损达到 1.3R) 且交易所持仓仍在时，
+            # 【保留灾难兜底止损】：只有当 ATR 和 initial_risk_r 均为有效正数，且价格穿透原定止损位超过 0.5 * ATR (或亏损达到 1.3R) 且交易所持仓仍在时，
             # 才代表交易所触发单可能出现异常失效/卡单，由本地执行市价强平兜底。
-            loss_r = -self.position.profit_r(price)
-            sl_penetration = (self.position.sl_price - price) if self.position.direction == "LONG" else (price - self.position.sl_price)
-            is_catastrophic_penetration = (sl_penetration >= 0.5 * current_atr) or (loss_r >= 1.3)
+            _atr = float(current_atr) if (current_atr and math.isfinite(current_atr) and current_atr > 0) else None
+            _ir = float(getattr(self.position, 'initial_risk_r', 0.0) or 0.0)
 
-            if is_catastrophic_penetration:
-                logger.error("[灾难兜底] 交易所止损疑似失效 | 穿透=%.2f(阈值=%.2f) | 亏损=%.2fR | action=本地市价紧急强平",
-                             sl_penetration, 0.5 * current_atr, loss_r)
-                send_alert(f"[灾难兜底] 价格严重穿透止损 ({sl_penetration:.2f} > 0.5xATR, {loss_r:.2f}R)，触发本地紧急市价强平！")
-                action = "CLOSE_DISASTER_FALLBACK"
-            else:
-                logger.debug("[持仓] 价格触及止损线(%.2f)，等待交易所侧硬止损触发成交", self.position.sl_price)
+            if _atr is None or not math.isfinite(_ir) or _ir <= 0:
+                logger.warning("[持仓] ATR (%.4f) 或 initial_risk_r (%.4f) 非法 | action=拒绝本地强平，交由交易所SL单处理",
+                               current_atr if current_atr is not None else -1.0, _ir)
                 action = "HOLD"
+            else:
+                loss_r = -self.position.profit_r(price)
+                sl_penetration = (self.position.sl_price - price) if self.position.direction == "LONG" else (price - self.position.sl_price)
+                is_catastrophic_penetration = (sl_penetration >= 0.5 * _atr) or (loss_r >= 1.3)
+
+                if is_catastrophic_penetration:
+                    logger.error("[灾难兜底] 交易所止损疑似失效 | 穿透=%.2f(阈值=%.2f) | 亏损=%.2fR | action=撤单并本地市价紧急强平",
+                                 sl_penetration, 0.5 * _atr, loss_r)
+                    send_alert(f"[灾难兜底] 价格严重穿透止损 ({sl_penetration:.2f} > 0.5xATR, {loss_r:.2f}R)，准备本地紧急市价强平！")
+                    # 先撤销交易所侧已有挂单，防止本地市价单与交易所触发单并发成交造成双倍反向裸仓
+                    try:
+                        self.exchange.cancel_all_orders()
+                    except Exception as ce:
+                        logger.warning("[灾难兜底] 撤销交易所保护单异常: %s", ce)
+                    # 二次核对持仓
+                    szi_check, _ = self.exchange.current_position()
+                    if szi_check is None or abs(szi_check) <= 0:
+                        logger.info("[灾难兜底] 交易所持仓已自行归零 | action=直接结算离场")
+                        self._settle_external_close()
+                        self._safe_sleep(TRADING_POLL_SECONDS, phase="TRADING_POLL", step=0.5)
+                        return
+                    action = "CLOSE_DISASTER_FALLBACK"
+                else:
+                    logger.debug("[持仓] 价格触及止损线(%.2f)，等待交易所侧硬止损触发成交", self.position.sl_price)
+                    action = "HOLD"
 
         if action != "HOLD":
             reason_map = {
@@ -1008,7 +1044,7 @@ class TradingBot:
                 "CLOSE_TIME_DECAY": "时间衰减平仓",
             }
             self._execute_market_close(reason_map.get(action, action), price, now_utc)
-            time.sleep(TRADING_POLL_SECONDS)
+            self._safe_sleep(TRADING_POLL_SECONDS, phase="TRADING_POLL", step=0.5)
             return
 
         # 5. FSM 内部 SL 移动 (保本/追踪) -> 同步交易所侧触发单
@@ -1047,14 +1083,16 @@ class TradingBot:
         # 本轮监控全程无异常 -> 清零连续异常计数 (保持"连续异常"语义)
         self.api_error_count = 0
 
-        time.sleep(TRADING_POLL_SECONDS)
+        self._safe_sleep(TRADING_POLL_SECONDS, phase="TRADING_POLL", step=0.5)
 
     def _refresh_local_hard_stop(self):
         """按最新 5m ATR 刷新本地硬止损安全垫（严格执行单向棘轮：只许收紧，不许放宽）。"""
-        if self.cached_atr_5m <= 0 or self.position is None:
+        if self.cached_atr_5m is None or not math.isfinite(self.cached_atr_5m) or self.cached_atr_5m <= 0 or self.position is None:
             return
         direction = self.position.direction
         ref = self.position.entry_price
+        if not math.isfinite(ref) or ref <= 0:
+            return
         dist = self.cached_atr_5m * (self.open_regime_cap + HARD_STOP_ATR_BUFFER)
         hard = ref - dist if direction == "LONG" else ref + dist
 
@@ -1108,14 +1146,25 @@ class TradingBot:
         except Exception as e:
             logger.warning("[对账] 清理残留风控单失败 | err=%s", e)
         self.exchange.clear_position_state()
+        self.last_synced_sl = None
+        self.cached_atr_5m = 0.0
+        self.last_hard_stop_refresh = None
 
-        exit_price = getattr(self.position, "peak_price", None) or getattr(self.position, "entry_price", None) or 0.0
+        exit_price = 0.0
         try:
             m_px = self.exchange.mark_price()
             if m_px and math.isfinite(m_px) and m_px > 0:
                 exit_price = float(m_px)
         except Exception:
             pass
+
+        if exit_price <= 0:
+            exit_price = getattr(self.position, "sl_price", 0.0) or getattr(self.position, "entry_price", 0.0) or 0.0
+
+        if exit_price <= 0:
+            logger.warning("[对账] 外部平仓无法获取有效离场价格 | 采用 entry_price 兜底")
+            exit_price = getattr(self, "position_entry_price", 0.0) or 1.0
+
         self._register_closed_position("交易所侧风控单成交离场", exit_price,
                                        datetime.now(timezone.utc))
 
@@ -1409,9 +1458,9 @@ class TradingBot:
             try:
                 init_r = float(getattr(prev_pos, "initial_risk_r", 0.0) or 0.0)
                 if init_r <= 0 or not math.isfinite(init_r):
-                    init_r = abs(entry_px - float(sl_px))
+                    init_r = max(abs(entry_px - float(sl_px)), atr_14 * 0.5, entry_px * 0.002)
             except (ValueError, TypeError):
-                init_r = abs(entry_px - float(sl_px))
+                init_r = max(abs(entry_px - float(sl_px)), atr_14 * 0.5, entry_px * 0.002)
 
             try:
                 prev_pk = float(getattr(prev_pos, "peak_price", 0.0) or 0.0)
@@ -1426,11 +1475,20 @@ class TradingBot:
                 b_held = int(getattr(prev_pos, "bars_held", 0) or 0)
             except (ValueError, TypeError):
                 b_held = 0
-            o_at = getattr(prev_pos, "opened_at", None) or datetime.now(timezone.utc)
+            raw_o_at = getattr(prev_pos, "opened_at", None)
+            if isinstance(raw_o_at, datetime):
+                o_at = float(raw_o_at.timestamp())
+            elif raw_o_at is not None:
+                try:
+                    o_at = float(raw_o_at)
+                except Exception:
+                    o_at = time.time()
+            else:
+                o_at = time.time()
             logger.info("[对账] 继承已持久化持仓风控元数据 | init_r=%.2f | peak=%.2f | bars_held=%d",
                         init_r, pk, b_held)
         else:
-            init_r = abs(entry_px - float(sl_px))
+            init_r = max(abs(entry_px - float(sl_px)), atr_14 * 0.5, entry_px * 0.002)
             pk = mark or entry_px
             b_held = 0
             o_at = time.time()
@@ -1446,6 +1504,11 @@ class TradingBot:
             bars_held=b_held,
             opened_at=o_at,
         )
+        try:
+            if hasattr(self, 'risk_mgr') and self.risk_mgr:
+                self.risk_mgr.confirm_position(self.coin, self.position.initial_risk_r)
+        except Exception as re:
+            logger.debug("[风控] 对账挂载登记仓位异常: %s", re)
         self.position_entry_price = entry_px
         self.position_direction = direction
         self.open_regime_cap = regime_sl_cap(self.final_macro_state) or 1.5
@@ -1642,6 +1705,20 @@ class TradingBot:
             pos_data = data.get("position")
             if isinstance(pos_data, dict):
                 try:
+                    opened_val = pos_data.get("opened_at")
+                    if isinstance(opened_val, (int, float)):
+                        parsed_opened_at = float(opened_val)
+                    elif isinstance(opened_val, str):
+                        try:
+                            parsed_opened_at = float(opened_val)
+                        except ValueError:
+                            try:
+                                parsed_opened_at = datetime.fromisoformat(opened_val).timestamp()
+                            except Exception:
+                                parsed_opened_at = time.time()
+                    else:
+                        parsed_opened_at = time.time()
+
                     self.position = Position(
                         entry_price=pos_data["entry_price"],
                         direction=pos_data["direction"],
@@ -1651,7 +1728,7 @@ class TradingBot:
                         initial_risk_r=pos_data["initial_risk_r"],
                         peak_price=pos_data["peak_price"],
                         bars_held=pos_data["bars_held"],
-                        opened_at=float(pos_data["opened_at"]) if pos_data.get("opened_at") else time.time(),
+                        opened_at=parsed_opened_at,
                         entry_score=float(pos_data.get("entry_score", 75.0)),
                         filled_sz=float(pos_data.get("filled_sz", 1.0)),
                     )

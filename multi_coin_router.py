@@ -22,6 +22,7 @@ __release_date__ = "2026-11-01"
 import json
 import math
 import os
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -348,15 +349,17 @@ class MultiCoinRouter:
         if not valid_signals:
             return None
         
-        return max(
-            valid_signals,
-            key=lambda s: (
-                s.ranking_score,
-                abs(s.trs),
-                abs(s.tp - s.price) / max(abs(s.price - s.sl), 1e-9),
-                s.coin,
-            )
-        )
+        def _sort_key(s):
+            r_score = float(s.ranking_score) if (s.ranking_score is not None and math.isfinite(s.ranking_score)) else 0.0
+            trs_val = abs(float(s.trs)) if (s.trs is not None and math.isfinite(s.trs)) else 0.0
+            p = float(s.price) if (s.price and math.isfinite(s.price)) else 1.0
+            tp = float(s.tp) if (s.tp and math.isfinite(s.tp)) else p
+            sl = float(s.sl) if (s.sl and math.isfinite(s.sl)) else p
+            rr = abs(tp - p) / max(abs(p - sl), 1e-6)
+            rr_val = rr if math.isfinite(rr) else 0.0
+            return (r_score, trs_val, rr_val, str(s.coin))
+
+        return max(valid_signals, key=_sort_key)
 
     def should_switch_position(self, new_signal: CoinSignal) -> bool:
         """
@@ -392,18 +395,29 @@ class MultiCoinRouter:
         """
         from concurrent.futures import ThreadPoolExecutor
 
-        self.latest_radar_scores = {}
-        self.latest_coin_prices = {}
+        radar_scores_collector: Dict[str, dict] = {}
+        coin_prices_collector: Dict[str, float] = {}
+        collector_lock = threading.Lock()
 
         def _eval(c):
             try:
-                return self.evaluate_coin_signal(c, calculate_signal_fn, calculate_trs_fn, macro_state)
+                sig = self.evaluate_coin_signal(c, calculate_signal_fn, calculate_trs_fn, macro_state)
+                with collector_lock:
+                    if c in self.latest_radar_scores:
+                        radar_scores_collector[c] = self.latest_radar_scores[c]
+                    if c in self.latest_coin_prices:
+                        coin_prices_collector[c] = self.latest_coin_prices[c]
+                return sig
             except Exception as e:
                 logger.error(f"[MultiCoin] 并发扫描 {c} 异常: {e}")
                 return None
 
         with ThreadPoolExecutor(max_workers=max(1, min(len(self.coins), 4))) as executor:
             signals_raw = list(executor.map(_eval, self.coins))
+
+        with collector_lock:
+            self.latest_radar_scores.update(radar_scores_collector)
+            self.latest_coin_prices.update(coin_prices_collector)
 
         valid_signals = [s for s in signals_raw if s is not None]
         return valid_signals, self.latest_radar_scores.copy(), self.latest_coin_prices.copy()
