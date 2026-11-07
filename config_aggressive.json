@@ -1,0 +1,130 @@
+{
+  "_comment": "激进风控配置 - 方案B（6-8x杠杆，适合小本金高风险偏好）",
+  "_version": "2.0-aggressive",
+  "_last_updated": "2026-10-10T12:25:00Z",
+  "environment": {
+    "hype_env": "testnet",
+    "initial_equity": 999.0,
+    "note": "测试网初始资金999U，验证通过后切换mainnet"
+  },
+  "leverage": {
+    "base_leverage": 6,
+    "max_leverage": 8,
+    "min_leverage": 4,
+    "dynamic_adjustment": true,
+    "comment": "动态杠杆：score>=85且宏观同向用8x，score>=75用6x，不确定时4x"
+  },
+  "risk_management": {
+    "single_risk_pct": 24.0,
+    "max_portfolio_heat_pct": 30.0,
+    "max_drawdown_pct": 30.0,
+    "daily_loss_limit_pct": 15.0,
+    "consecutive_loss_limit": 4,
+    "cooldown_hours_after_streak": 12.0,
+    "comment": "激进模式：单笔风险24%（6x*4%），最大回撤30%"
+  },
+  "position_sizing": {
+    "kelly_fraction": 0.5,
+    "atr_sl_multiplier": 1.5,
+    "breakeven_profit_r": 1.0,
+    "trailing_start_r": 1.5,
+    "trailing_atr_multiplier": 1.5,
+    "max_holding_bars": 24,
+    "time_decay_threshold_r": 0.5,
+    "comment": "Kelly=0.8接近Full Kelly，止损2倍ATR约4%"
+  },
+  "signal_evaluation": {
+    "signal_gate": 70.0,
+    "signal_candle_seconds": 300,
+    "signal_align_seconds": 2,
+    "comment": "信号门槛70分，基于5m K线收盘+2s触发"
+  },
+  "multi_coin": {
+    "enabled": true,
+    "coins": [
+      "BTC",
+      "ETH",
+      "SUI",
+      "LINK"
+    ],
+    "mode": "sequential_rotation",
+    "max_concurrent_positions": 1,
+    "switch_threshold_delta": 10,
+    "correlation_soft_constraint": true,
+    "correlation_penalty_threshold": 0.7,
+    "correlation_lookback_days": 30,
+    "comment": "单持仓轮动模式，同时只持1个币种，相关性>0.7时降权"
+  },
+  "ai_macro": {
+    "enabled": true,
+    "shared_across_coins": true,
+    "schedule_hours_utc": [
+      0,
+      8,
+      16
+    ],
+    "event_cooldown_seconds": 900,
+    "comment": "4个币种共享AI_macro结果，节省成本"
+  },
+  "timing": {
+    "idle_poll_seconds": 5,
+    "trading_poll_seconds": 1,
+    "idle_reconcile_seconds": 10,
+    "trading_reconcile_seconds": 5,
+    "atr_refresh_seconds": 60,
+    "hard_stop_refresh_seconds": 900,
+    "heartbeat_seconds": 60,
+    "network_timeout_seconds": 20
+  },
+  "indicators": {
+    "ema_period_1h": 150,
+    "ema_period_4h": 200,
+    "donchian_period": 20,
+    "adx_threshold": 25,
+    "rsi_period": 14,
+    "rsi_oversold": 25,
+    "rsi_overbought": 65,
+    "bb_period": 20,
+    "bb_std": 2.0,
+    "cci_period": 20,
+    "atr_period_5m": 14,
+    "fr_window_hours": 168,
+    "comment": "默认指标参数，可通过Walk-forward优化"
+  },
+  "trading_costs": {
+    "fee_rate": 0.0007,
+    "slippage_rate": 0.0003,
+    "roundtrip_friction": 0.002,
+    "comment": "单边手续费0.07%，滑点0.03%，双边总摩擦成本0.20% (0.0020)"
+  },
+  "alerts": {
+    "idle_alert_threshold": 5,
+    "trading_alert_threshold": 2,
+    "close_fail_alert_threshold": 5,
+    "enable_telegram": false,
+    "enable_email": false,
+    "comment": "告警阈值，可接入Telegram/Email通知"
+  },
+  "optimization": {
+    "walk_forward_enabled": false,
+    "train_window_days": 90,
+    "test_window_days": 15,
+    "step_days": 15,
+    "optimize_metric": "calmar_ratio",
+    "comment": "Walk-forward参数优化配置，独立脚本运行"
+  },
+  "safety": {
+    "max_loops": 0,
+    "state_file": "state_aggressive.json",
+    "risk_state_file": "risk_state_aggressive.json",
+    "log_level": "INFO",
+    "enable_look_ahead_check": true,
+    "comment": "安全机制：Look-ahead bias检查、状态持久化"
+  },
+  "coins": [
+    "BTC",
+    "ETH",
+    "SUI",
+    "ARB"
+  ]
+}

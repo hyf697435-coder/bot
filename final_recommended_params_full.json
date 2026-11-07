@@ -1,0 +1,191 @@
+{
+  "final_params": {
+    "ema_period_1h": 150,
+    "ema_period_4h": 200,
+    "atr_sl_multiplier": 2.5,
+    "signal_gate": 65,
+    "rsi_oversold": 30,
+    "rsi_overbought": 60,
+    "kelly_fraction": 0.5
+  },
+  "per_coin_params": {
+    "BTC": {
+      "ema_period_1h": 150,
+      "ema_period_4h": 200,
+      "atr_sl_multiplier": 2.5,
+      "signal_gate": 65,
+      "rsi_oversold": 30,
+      "rsi_overbought": 60,
+      "kelly_fraction": 0.5
+    },
+    "ETH": {
+      "ema_period_1h": 150,
+      "ema_period_4h": 200,
+      "atr_sl_multiplier": 2.5,
+      "signal_gate": 65,
+      "rsi_oversold": 30,
+      "rsi_overbought": 60,
+      "kelly_fraction": 0.5
+    },
+    "SUI": {
+      "ema_period_1h": 150,
+      "ema_period_4h": 200,
+      "atr_sl_multiplier": 2.5,
+      "signal_gate": 65,
+      "rsi_oversold": 30,
+      "rsi_overbought": 60,
+      "kelly_fraction": 0.5
+    }
+  },
+  "per_coin_metrics": {
+    "BTC": {
+      "total_windows": 6,
+      "avg_test_calmar": 3667.1796990587645,
+      "median_test_calmar": 2346.549777988635,
+      "avg_test_maxdd": 0.014832390353541796,
+      "avg_test_winrate": 0.5555555555555556,
+      "recommended_params": {
+        "ema_period_1h": 150,
+        "ema_period_4h": 200,
+        "atr_sl_multiplier": 2.5,
+        "signal_gate": 65,
+        "rsi_oversold": 30,
+        "rsi_overbought": 60,
+        "kelly_fraction": 0.5
+      },
+      "param_frequency": {
+        "ema_period_1h": {
+          "150": 6
+        },
+        "ema_period_4h": {
+          "200": 6
+        },
+        "atr_sl_multiplier": {
+          "2.5": 2,
+          "1.5": 2,
+          "2.0": 2
+        },
+        "signal_gate": {
+          "65": 4,
+          "75": 2
+        },
+        "rsi_oversold": {
+          "30": 6
+        },
+        "rsi_overbought": {
+          "60": 6
+        },
+        "kelly_fraction": {
+          "0.5": 6
+        }
+      }
+    },
+    "ETH": {
+      "total_windows": 6,
+      "avg_test_calmar": 3667.1796990587645,
+      "median_test_calmar": 2346.549777988635,
+      "avg_test_maxdd": 0.014832390353541796,
+      "avg_test_winrate": 0.5555555555555556,
+      "recommended_params": {
+        "ema_period_1h": 150,
+        "ema_period_4h": 200,
+        "atr_sl_multiplier": 2.5,
+        "signal_gate": 65,
+        "rsi_oversold": 30,
+        "rsi_overbought": 60,
+        "kelly_fraction": 0.5
+      },
+      "param_frequency": {
+        "ema_period_1h": {
+          "150": 6
+        },
+        "ema_period_4h": {
+          "200": 6
+        },
+        "atr_sl_multiplier": {
+          "2.5": 2,
+          "1.5": 2,
+          "2.0": 2
+        },
+        "signal_gate": {
+          "65": 4,
+          "75": 2
+        },
+        "rsi_oversold": {
+          "30": 6
+        },
+        "rsi_overbought": {
+          "60": 6
+        },
+        "kelly_fraction": {
+          "0.5": 6
+        }
+      }
+    },
+    "SUI": {
+      "total_windows": 6,
+      "avg_test_calmar": 3667.1796990587645,
+      "median_test_calmar": 2346.549777988635,
+      "avg_test_maxdd": 0.014832390353541796,
+      "avg_test_winrate": 0.5555555555555556,
+      "recommended_params": {
+        "ema_period_1h": 150,
+        "ema_period_4h": 200,
+        "atr_sl_multiplier": 2.5,
+        "signal_gate": 65,
+        "rsi_oversold": 30,
+        "rsi_overbought": 60,
+        "kelly_fraction": 0.5
+      },
+      "param_frequency": {
+        "ema_period_1h": {
+          "150": 6
+        },
+        "ema_period_4h": {
+          "200": 6
+        },
+        "atr_sl_multiplier": {
+          "2.5": 2,
+          "1.5": 2,
+          "2.0": 2
+        },
+        "signal_gate": {
+          "65": 4,
+          "75": 2
+        },
+        "rsi_oversold": {
+          "30": 6
+        },
+        "rsi_overbought": {
+          "60": 6
+        },
+        "kelly_fraction": {
+          "0.5": 6
+        }
+      }
+    }
+  },
+  "vote_detail": {
+    "ema_period_1h": {
+      "150": 3
+    },
+    "ema_period_4h": {
+      "200": 3
+    },
+    "atr_sl_multiplier": {
+      "2.5": 3
+    },
+    "signal_gate": {
+      "65": 3
+    },
+    "rsi_oversold": {
+      "30": 3
+    },
+    "rsi_overbought": {
+      "60": 3
+    },
+    "kelly_fraction": {
+      "0.5": 3
+    }
+  }
+}

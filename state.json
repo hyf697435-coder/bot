@@ -1,0 +1,77 @@
+{
+  "state": "IDLE",
+  "coin": "ETH",
+  "daily_start_equity": 1000.0,
+  "daily_loss_date": "2026-11-07",
+  "daily_loss_pnl": 0.0,
+  "quant_state": "NEUTRAL",
+  "final_macro_state": "NEUTRAL",
+  "cached_ai_macro_state": "NEUTRAL",
+  "last_trs": -0.16558999450419146,
+  "news_impact": "Fear index at 28 and Binance $6.3B hack headline signal acute systemic contagion risk still unfolding; market has not yet priced structural liquidity/custody tail risk despite 7.8% local bounce.",
+  "sentiment": {
+    "status": "ok",
+    "timestamp": 1793981001.1889544,
+    "updated_at": "2026-11-06 16:03:25 UTC",
+    "fear_and_greed": {
+      "value": 28,
+      "classification": "Fear"
+    },
+    "top_headlines_24h": [
+      "What Democrats’ US midterm sweep means for the CLARITY Act (Fri, 06 Nov 2026 14:30:00 +0000)",
+      "Nigeria sets new crypto licensing rules, bans algorithmic stablecoins (Fri, 06 Nov 2026 13:57:14 +0000)",
+      "Here’s what happened in crypto today (Fri, 06 Nov 2026 13:33:00 +0000)",
+      "Ethereum devs won’t fork Glamsterdam on Hoodi until smart contract risks resolved (Fri, 06 Nov 2026 13:23:08 +0000)",
+      "Solana’s Shanghai event halted over unauthorized promotion: Report (Fri, 06 Nov 2026 12:15:28 +0000)",
+      "Binance hackers had 8 weeks of access before $6.3B exploit, Security Alliance estimates (Fri, 06 Nov 2026 11:26:30 +0000)"
+    ]
+  },
+  "radar_scores": {
+    "BTC": {
+      "score": 0.0,
+      "direction": "NEUTRAL",
+      "price": 75951.0,
+      "trs": -0.3651
+    },
+    "ETH": {
+      "score": 0.0,
+      "direction": "NEUTRAL",
+      "price": 2256.5,
+      "trs": -0.1657
+    },
+    "SUI": {
+      "score": 0.0,
+      "direction": "NEUTRAL",
+      "price": 0.87485,
+      "trs": -0.1878
+    },
+    "ARB": {
+      "score": 0.0,
+      "direction": "NEUTRAL",
+      "price": 0.16526,
+      "trs": -0.1196
+    }
+  },
+  "coin_prices": {
+    "BTC": 75951.0,
+    "ETH": 2256.5,
+    "SUI": 0.87485,
+    "ARB": 0.16526
+  },
+  "last_macro_slot": [
+    "2026-11-06",
+    16
+  ],
+  "last_event_macro_time": "2026-11-06T15:25:02.000575+00:00",
+  "last_evaluated_candle_time": 1794018300000,
+  "last_ai_trade_call_ts": 1794018016.848813,
+  "consecutive_failures": 0,
+  "cooldown_until": null,
+  "last_closed_pnl": -0.006114615618991623,
+  "open_regime_cap": 1.5,
+  "last_synced_sl": null,
+  "cached_atr_5m": 213.72628640898196,
+  "position": null,
+  "position_entry_price": null,
+  "position_direction": null
+}

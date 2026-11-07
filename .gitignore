@@ -1,0 +1,6 @@
+.env
+.heartbeat
+*.log
+__pycache__/
+*.pyc
+.pytest_cache/

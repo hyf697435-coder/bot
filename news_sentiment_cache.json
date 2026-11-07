@@ -1,0 +1,17 @@
+{
+  "status": "ok",
+  "timestamp": 1793981001.1889544,
+  "updated_at": "2026-11-06 16:03:25 UTC",
+  "fear_and_greed": {
+    "value": 28,
+    "classification": "Fear"
+  },
+  "top_headlines_24h": [
+    "What Democrats’ US midterm sweep means for the CLARITY Act (Fri, 06 Nov 2026 14:30:00 +0000)",
+    "Nigeria sets new crypto licensing rules, bans algorithmic stablecoins (Fri, 06 Nov 2026 13:57:14 +0000)",
+    "Here’s what happened in crypto today (Fri, 06 Nov 2026 13:33:00 +0000)",
+    "Ethereum devs won’t fork Glamsterdam on Hoodi until smart contract risks resolved (Fri, 06 Nov 2026 13:23:08 +0000)",
+    "Solana’s Shanghai event halted over unauthorized promotion: Report (Fri, 06 Nov 2026 12:15:28 +0000)",
+    "Binance hackers had 8 weeks of access before $6.3B exploit, Security Alliance estimates (Fri, 06 Nov 2026 11:26:30 +0000)"
+  ]
+}

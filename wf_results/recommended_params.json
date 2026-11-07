@@ -1,0 +1,9 @@
+{
+  "ema_period_1h": 150,
+  "ema_period_4h": 200,
+  "atr_sl_multiplier": 2.5,
+  "signal_gate": 65,
+  "rsi_oversold": 30,
+  "rsi_overbought": 60,
+  "kelly_fraction": 0.5
+}

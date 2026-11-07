@@ -1,0 +1,11 @@
+{
+  "ema_period_1h": 30,
+  "ema_period_4h": 80,
+  "atr_sl_multiplier": 1.2,
+  "signal_gate": 75,
+  "rsi_oversold": 25,
+  "rsi_overbought": 60,
+  "trailing_start_r": 0.8,
+  "trailing_atr_multiplier": 1.0,
+  "breakeven_profit_r": 0.75
+}

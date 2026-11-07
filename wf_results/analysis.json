@@ -1,0 +1,226 @@
+{
+  "windows": [
+    {
+      "window_id": 1,
+      "train_period": "2026-04-13 ~ 2026-07-12",
+      "test_period": "2026-07-12 ~ 2026-07-27",
+      "params": {
+        "ema_period_1h": 150,
+        "ema_period_4h": 200,
+        "atr_sl_multiplier": 2.5,
+        "signal_gate": 65,
+        "rsi_oversold": 30,
+        "rsi_overbought": 60,
+        "kelly_fraction": 0.5
+      },
+      "train_metrics": {
+        "calmar_ratio": -1.093487844136817,
+        "sharpe": -0.17261864011172823,
+        "max_dd": 0.060326372169490584,
+        "win_rate": 0.25,
+        "total_trades": 8,
+        "final_capital": 983.3138387088468
+      },
+      "test_metrics": {
+        "calmar_ratio": 4679.335957120674,
+        "sharpe": 0,
+        "max_dd": 0.0001,
+        "win_rate": 1.0,
+        "total_trades": 1,
+        "final_capital": 1015.8999720070915
+      }
+    },
+    {
+      "window_id": 2,
+      "train_period": "2026-04-28 ~ 2026-07-27",
+      "test_period": "2026-07-27 ~ 2026-08-11",
+      "params": {
+        "ema_period_1h": 150,
+        "ema_period_4h": 200,
+        "atr_sl_multiplier": 1.5,
+        "signal_gate": 65,
+        "rsi_oversold": 30,
+        "rsi_overbought": 60,
+        "kelly_fraction": 0.5
+      },
+      "train_metrics": {
+        "calmar_ratio": 9.819177659858772,
+        "sharpe": 0.6340540750403821,
+        "max_dd": 0.052011470238036935,
+        "win_rate": 0.5263157894736842,
+        "total_trades": 19,
+        "final_capital": 1107.0866980332567
+      },
+      "test_metrics": {
+        "calmar_ratio": 5250.008440398572,
+        "sharpe": 119.19584945737674,
+        "max_dd": 0.0001,
+        "win_rate": 1.0,
+        "total_trades": 2,
+        "final_capital": 1017.4935088189238
+      }
+    },
+    {
+      "window_id": 3,
+      "train_period": "2026-05-13 ~ 2026-08-11",
+      "test_period": "2026-08-11 ~ 2026-08-26",
+      "params": {
+        "ema_period_1h": 150,
+        "ema_period_4h": 200,
+        "atr_sl_multiplier": 2.0,
+        "signal_gate": 75,
+        "rsi_oversold": 30,
+        "rsi_overbought": 60,
+        "kelly_fraction": 0.5
+      },
+      "train_metrics": {
+        "calmar_ratio": -2.4743807411258465,
+        "sharpe": -0.7425474917141226,
+        "max_dd": 0.08094374744854652,
+        "win_rate": 0.2222222222222222,
+        "total_trades": 9,
+        "final_capital": 946.3812711797033
+      },
+      "test_metrics": {
+        "calmar_ratio": 13.763598856596062,
+        "sharpe": 0.8595253752208205,
+        "max_dd": 0.02409695486625094,
+        "win_rate": 0.3333333333333333,
+        "total_trades": 3,
+        "final_capital": 1011.8405189830966
+      }
+    },
+    {
+      "window_id": 4,
+      "train_period": "2026-05-28 ~ 2026-08-26",
+      "test_period": "2026-08-26 ~ 2026-09-10",
+      "params": {
+        "ema_period_1h": 150,
+        "ema_period_4h": 200,
+        "atr_sl_multiplier": 1.5,
+        "signal_gate": 75,
+        "rsi_oversold": 30,
+        "rsi_overbought": 60,
+        "kelly_fraction": 0.5
+      },
+      "train_metrics": {
+        "calmar_ratio": 4.697050367616792,
+        "sharpe": 0.3458589146281686,
+        "max_dd": 0.03061055914832413,
+        "win_rate": 0.46153846153846156,
+        "total_trades": 13,
+        "final_capital": 1033.6791575350244
+      },
+      "test_metrics": {
+        "calmar_ratio": -21.890392215164923,
+        "sharpe": 0,
+        "max_dd": 0.0092063905369464,
+        "win_rate": 0.0,
+        "total_trades": 1,
+        "final_capital": 990.7936094630536
+      }
+    },
+    {
+      "window_id": 5,
+      "train_period": "2026-06-12 ~ 2026-09-10",
+      "test_period": "2026-09-10 ~ 2026-09-25",
+      "params": {
+        "ema_period_1h": 150,
+        "ema_period_4h": 200,
+        "atr_sl_multiplier": 2.0,
+        "signal_gate": 65,
+        "rsi_oversold": 30,
+        "rsi_overbought": 60,
+        "kelly_fraction": 0.5
+      },
+      "train_metrics": {
+        "calmar_ratio": 9.915865652507154,
+        "sharpe": 0.8268657496727718,
+        "max_dd": 0.03948737379791925,
+        "win_rate": 0.5454545454545454,
+        "total_trades": 11,
+        "final_capital": 1084.8842006679706
+      },
+      "test_metrics": {
+        "calmar_ratio": -13.541554860929049,
+        "sharpe": -22.81607335980908,
+        "max_dd": 0.05539099671805343,
+        "win_rate": 0.0,
+        "total_trades": 4,
+        "final_capital": 944.6090032819466
+      }
+    },
+    {
+      "window_id": 6,
+      "train_period": "2026-06-27 ~ 2026-09-25",
+      "test_period": "2026-09-25 ~ 2026-10-10",
+      "params": {
+        "ema_period_1h": 150,
+        "ema_period_4h": 200,
+        "atr_sl_multiplier": 2.5,
+        "signal_gate": 65,
+        "rsi_oversold": 30,
+        "rsi_overbought": 60,
+        "kelly_fraction": 0.5
+      },
+      "train_metrics": {
+        "calmar_ratio": 3.599326033723045,
+        "sharpe": 0.2980985760169241,
+        "max_dd": 0.03499214842279343,
+        "win_rate": 0.375,
+        "total_trades": 8,
+        "final_capital": 1029.6821050219196
+      },
+      "test_metrics": {
+        "calmar_ratio": 12095.402145052838,
+        "sharpe": 0,
+        "max_dd": 0.0001,
+        "win_rate": 1.0,
+        "total_trades": 1,
+        "final_capital": 1033.1167279307167
+      }
+    }
+  ],
+  "analysis": {
+    "total_windows": 6,
+    "avg_test_calmar": 3667.1796990587645,
+    "median_test_calmar": 2346.549777988635,
+    "avg_test_maxdd": 0.014832390353541796,
+    "avg_test_winrate": 0.5555555555555556,
+    "recommended_params": {
+      "ema_period_1h": 150,
+      "ema_period_4h": 200,
+      "atr_sl_multiplier": 2.5,
+      "signal_gate": 65,
+      "rsi_oversold": 30,
+      "rsi_overbought": 60,
+      "kelly_fraction": 0.5
+    },
+    "param_frequency": {
+      "ema_period_1h": {
+        "150": 6
+      },
+      "ema_period_4h": {
+        "200": 6
+      },
+      "atr_sl_multiplier": {
+        "2.5": 2,
+        "1.5": 2,
+        "2.0": 2
+      },
+      "signal_gate": {
+        "65": 4,
+        "75": 2
+      },
+      "rsi_oversold": {
+        "30": 6
+      },
+      "rsi_overbought": {
+        "60": 6
+      },
+      "kelly_fraction": {
+        "0.5": 6
+      }
+    }
+  }
+}
