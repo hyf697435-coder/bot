@@ -788,9 +788,23 @@ class HyperliquidExecutor:
                     logger.warning("[执行] 撤单未确认 | oid=%s | resp=%s", oid, resp)
             except Exception as e:
                 logger.warning("[执行] 撤单失败 | oid=%s | err=%s", raw_oid, e)
-        self._ai_sl_oid = None
-        self._hard_sl_oid = None
-        self._tp_oid = None
+        self._clear_protection_tracking()
+
+    def get_recent_fills(self, coin: Optional[str] = None) -> List[dict]:
+        """拉取最近的用户成交记录 (fills)，用于精准结算离场价格。"""
+        if not self.ready or self._info is None or not self.user:
+            return []
+        try:
+            fills = self._info.user_fills(self.user) or []
+            if not isinstance(fills, list):
+                return []
+            target_coin = coin or self.coin
+            if target_coin:
+                return [f for f in fills if isinstance(f, dict) and f.get("coin") == target_coin]
+            return [f for f in fills if isinstance(f, dict)]
+        except Exception as e:
+            logger.warning("[执行] 查询成交流水异常 | err=%s", e)
+            return []
 
     def _cancel_order(self, oid):
         """撤销指定挂单，用于单独替换本地硬止损。防御字符串/非整型转换异常与撤单失败状态校验。"""
@@ -894,10 +908,15 @@ class HyperliquidExecutor:
                     logger.error("[执行] 硬止损挂载失败 | action=保留主止损 | err=%s", e)
                     send_alert(f"本地硬止损挂载失败，仅保留主止损: {e}")
 
-        if take_profit and float(take_profit) > 0:
-            self._tp_price = float(take_profit)
-            oids["tp"] = self._place_trigger("tp", float(take_profit))
-            self._tp_oid = oids["tp"]
+        if take_profit:
+            try:
+                tp_f = float(take_profit)
+                if math.isfinite(tp_f) and tp_f > 0:
+                    self._tp_price = tp_f
+                    oids["tp"] = self._place_trigger("tp", tp_f)
+                    self._tp_oid = oids["tp"]
+            except (ValueError, TypeError, ExecutionError) as e:
+                logger.warning("[执行] 挂载止盈单异常: %s", e)
         return oids
 
     def refresh_hard_stop(self, new_hard_stop: Optional[float]) -> Optional[float]:
@@ -1044,9 +1063,14 @@ class HyperliquidExecutor:
 
             # 本地硬止损：比主止损再宽 hard_stop_distance (默认 0.2xATR)，避免正常滑点先打掉兜底单
             hard_sl = None
-            if hard_stop_distance and hard_stop_distance > 0 and stop_loss and float(stop_loss) > 0:
-                sl_px = float(stop_loss)
-                hard_sl = sl_px - float(hard_stop_distance) if is_buy else sl_px + float(hard_stop_distance)
+            if hard_stop_distance and stop_loss:
+                try:
+                    hd = float(hard_stop_distance)
+                    sl_px = float(stop_loss)
+                    if math.isfinite(hd) and hd > 0 and math.isfinite(sl_px) and sl_px > 0:
+                        hard_sl = sl_px - hd if is_buy else sl_px + hd
+                except (ValueError, TypeError):
+                    hard_sl = None
 
             try:
                 self._place_protective_stops(stop_loss, hard_sl, take_profit)

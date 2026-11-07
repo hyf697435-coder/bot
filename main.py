@@ -23,6 +23,7 @@ __release_date__ = "2026-11-01"
 
 
 import json
+import math
 import os
 import time
 from collections import deque
@@ -431,13 +432,13 @@ class TradingBot:
                     if self.state == STATE_IDLE:
                         now_ts = datetime.now(timezone.utc).timestamp()
                         wait = min(IDLE_POLL_SECONDS, seconds_until_next_signal_node(now_ts))
-                        time.sleep(max(wait, 0.05))
+                        self._safe_sleep(max(wait, 0.05), phase="IDLE_POLL", step=1.0)
                     continue
 
                 # 兜底：未知状态，回到 IDLE
                 logger.warning("[恢复] 未知状态 | state=%s | action=重置为IDLE", self.state)
                 self.state = STATE_IDLE
-                time.sleep(5)
+                self._safe_sleep(5, phase="RECOVER_IDLE", step=1.0)
 
             except KeyboardInterrupt:
                 raise
@@ -471,6 +472,7 @@ class TradingBot:
                     "[巡检] 信号节点跳过 | 上次=%s | 当前=%s | 跳过=%s 个节点 "
                     "| 疑似主循环被阻塞/系统休眠/时钟跳变",
                     self.last_signal_node, node, missed)
+        prev_signal_node = self.last_signal_node
         self.last_signal_node = node
         if self._recent_node_triggers:
             prev_node, prev_ts = self._recent_node_triggers[-1]
@@ -493,7 +495,8 @@ class TradingBot:
         fr_stats = self.market.get_funding_stats(FR_WINDOW_HOURS)
 
         if df_5m is None or df_5m.empty or "ts" not in df_5m.columns or len(df_5m) < 15:
-            logger.warning("[巡检] 5m K 线数据不足 | action=跳过本轮")
+            logger.warning("[巡检] 5m K 线数据不足 | action=跳过本轮并允许重试")
+            self.last_signal_node = prev_signal_node
             return
 
         # 节点命中可观测性: 每个信号节点至少落一条 INFO, 并比对 5m K 线时间戳是否滚动
@@ -511,7 +514,8 @@ class TradingBot:
         atr_calc = utils.atr(df_5m["high"], df_5m["low"], df_5m["close"], 14)
         atr_14 = float(atr_calc) if (atr_calc is not None and math.isfinite(atr_calc)) else 0.0
         if atr_14 <= 0:
-            logger.warning("[巡检] 5m ATR 不可用 | action=跳过本轮")
+            logger.warning("[巡检] 5m ATR 不可用 | action=跳过本轮并允许重试")
+            self.last_signal_node = prev_signal_node
             return
 
         # 4. 宏观趋势计算与校验 (本地 TRS)
@@ -696,18 +700,25 @@ class TradingBot:
             return
         self.last_evaluated_candle_time = current_candle_time
         self._last_evaluated_coin = self.coin
-        self.last_ai_trade_call_ts = now_epoch
-        self._persist_state()
 
         # 8. 唤醒 AI_Trade 进行关口审查 (形态/插针识别 + 最终拦截)
         self._write_heartbeat(phase="AI_TRADE")
         payload = build_trade_payload(
             signal_res, df_5m, df_1h, price, atr_14, self.final_macro_state.value)
-        ai_response = evaluate_trade_execution(payload, self.ai)
+        try:
+            ai_response = evaluate_trade_execution(payload, self.ai)
+        except Exception as e:
+            logger.error("[AI] AI_Trade 调用异常: %s | action=放弃本轮开仓", e)
+            self._reset_idle_counters()
+            return
+
         if not ai_response or not isinstance(ai_response, dict):
             logger.warning("[AI] AI_Trade 返回无效响应 | action=放弃开仓")
             self._reset_idle_counters()
             return
+
+        self.last_ai_trade_call_ts = now_epoch
+        self._persist_state()
 
         if ai_response.get("decision") != "EXECUTE":
             logger.info("[AI] AI_Trade 拦截 | decision=%s | reason=%s",
@@ -760,9 +771,12 @@ class TradingBot:
 
         # 第二步：执行全域日亏与动态回撤硬熔断检查
         est_risk_usd = sz_notional * (sl_distance / price + 2.0 * TRADING_FEE_RATE)
-        can_open, reject_msg = self.risk_mgr.can_open_position(est_risk_usd, equity=equity)
+        can_open, reject_msg = self.risk_mgr.can_open_position(
+            est_risk_usd, equity=equity, coin=self.coin, reserve_slot=True
+        )
         if not can_open:
             logger.warning("[风控] 熔断拦截放弃开仓 | reason=%s", reject_msg)
+            self._reset_idle_counters()
             return
 
         logger.info("[仓位] 完成 | 样本=%d/%d | 最终名义=%.2f USDT (杠杆=%.2fx) | 止损距离=%.2f",
@@ -845,6 +859,8 @@ class TradingBot:
         regime_cap = regime_sl_cap(self.final_macro_state)
         if regime_cap <= 0:
             logger.warning("[开仓] 拦截 | reason=宏观状态禁止交易 | 宏观态=%s", self.final_macro_state.value)
+            if hasattr(self, 'risk_mgr') and self.risk_mgr:
+                self.risk_mgr.release_position_slot(self.coin)
             return
 
         try:
@@ -860,10 +876,14 @@ class TradingBot:
         except ExecutionError as e:
             logger.error("[开仓] 失败 | reason=执行层异常 | err=%s", e)
             send_alert(f"开仓执行异常: {e}")
+            if hasattr(self, 'risk_mgr') and self.risk_mgr:
+                self.risk_mgr.release_position_slot(self.coin)
             return
 
         if resp is None:
             logger.error("[开仓] 失败 | reason=交易所未确认成交 | action=保持空仓")
+            if hasattr(self, 'risk_mgr') and self.risk_mgr:
+                self.risk_mgr.release_position_slot(self.coin)
             return
 
         _, avg_px = HyperliquidExecutor._extract_filled(resp)
@@ -1117,16 +1137,48 @@ class TradingBot:
 
     def _execute_market_close(self, reason_label: str, latest_price: float,
                               now_utc: datetime) -> bool:
-        """市价全平并结算。只有交易所确认后才清空状态机与仓位记账。"""
+        """市价全平并结算。先撤保护单防反手，若交易所已自行平仓则直接结算。"""
+        try:
+            self.exchange.cancel_all_orders()
+        except Exception as e:
+            logger.warning("[平仓] 撤销保护单异常 | err=%s", e)
+
+        # 检查是否已由交易所侧止损单等成交归零
+        try:
+            szi, _ = self.exchange.current_position()
+            if szi is not None and abs(szi) <= 0:
+                logger.info("[平仓] 交易所持仓已自行归零，直接完成结算 | reason=%s", reason_label)
+                self._register_closed_position(reason_label, latest_price, now_utc)
+                return True
+        except Exception as pe:
+            logger.debug("[平仓] 查询持仓状态异常: %s", pe)
+
         try:
             resp = self.exchange.close_all()
         except ExecutionError as e:
+            # 二次核对持仓是否已归零
+            try:
+                szi_after, _ = self.exchange.current_position()
+                if szi_after is not None and abs(szi_after) <= 0:
+                    logger.info("[平仓] 捕获异常但交易所持仓已归零，判定平仓成功 | reason=%s", reason_label)
+                    self._register_closed_position(reason_label, latest_price, now_utc)
+                    return True
+            except Exception:
+                pass
             send_alert(f"[{reason_label}] 平仓执行异常，仓位未平: {e}")
             self.close_fail_count += 1
             self._maybe_emergency_protect()
             return False
 
         if resp is None:
+            try:
+                szi_after, _ = self.exchange.current_position()
+                if szi_after is not None and abs(szi_after) <= 0:
+                    logger.info("[平仓] 未收到回执但持仓已归零，判定平仓成功 | reason=%s", reason_label)
+                    self._register_closed_position(reason_label, latest_price, now_utc)
+                    return True
+            except Exception:
+                pass
             self.close_fail_count += 1
             send_alert(f"[{reason_label}] 交易所未确认平仓 ({self.close_fail_count} 次)，"
                                f"仓位仍在外，禁止推进状态。")
@@ -1152,11 +1204,24 @@ class TradingBot:
 
         exit_price = 0.0
         try:
-            m_px = self.exchange.mark_price()
-            if m_px and math.isfinite(m_px) and m_px > 0:
-                exit_price = float(m_px)
-        except Exception:
-            pass
+            if hasattr(self.exchange, "get_recent_fills"):
+                fills = self.exchange.get_recent_fills(self.coin)
+                if fills:
+                    for f in fills:
+                        px = float(f.get("px", 0.0) or 0.0)
+                        if px > 0 and math.isfinite(px):
+                            exit_price = px
+                            break
+        except Exception as fe:
+            logger.debug("[对账] 查询成交流水退出价异常: %s", fe)
+
+        if exit_price <= 0:
+            try:
+                m_px = self.exchange.mark_price()
+                if m_px and math.isfinite(m_px) and m_px > 0:
+                    exit_price = float(m_px)
+            except Exception:
+                pass
 
         if exit_price <= 0:
             exit_price = getattr(self.position, "sl_price", 0.0) or getattr(self.position, "entry_price", 0.0) or 0.0
@@ -1357,7 +1422,7 @@ class TradingBot:
         if self.state == STATE_TRADING:
             if self.api_error_count >= TRADING_ALERT_THRESHOLD:
                 self._deploy_emergency_hard_stop()
-            time.sleep(10)
+            self._safe_sleep(10, phase="TRADING_EXC_BACKOFF", step=1.0)
         elif self.state == STATE_IDLE:
             self.idle_api_error_count += 1
             if self.idle_api_error_count >= IDLE_ALERT_THRESHOLD:
@@ -1367,7 +1432,7 @@ class TradingBot:
             self._safe_sleep(self.idle_backoff, phase="IDLE_BACKOFF")
             self.idle_backoff = min(self.idle_backoff * 2, 600)
         else:
-            time.sleep(10)
+            self._safe_sleep(10, phase="LOOP_EXC_BACKOFF", step=1.0)
 
     def _enter_system_halt(self, reason: str):
         """SYSTEM_HALT：市价清空持仓与挂单后进入死循环休眠。"""
@@ -1407,7 +1472,7 @@ class TradingBot:
         except Exception as e:
             logger.warning("[对账] 查询交易所持仓失败 | err=%s", e)
             return False
-        if abs(szi) <= 0:
+        if szi is None or abs(szi) <= 0:
             return False
         logger.warning("[对账] 检测到遗留仓位 | sz=%s %s | action=IDLE挂载至TRADING",
                        szi, COIN)
@@ -1455,6 +1520,12 @@ class TradingBot:
         # 如果启动时已从 state.json 恢复了持仓快照，优先继承其精确风控元数据 (防止重置 peak_price / bars_held / initial_risk_r)
         prev_pos = self.position
         if prev_pos is not None and getattr(prev_pos, "direction", None) == direction:
+            prev_sl = float(getattr(prev_pos, "sl_price", 0.0) or 0.0)
+            if prev_sl > 0 and math.isfinite(prev_sl):
+                if direction == "LONG":
+                    sl_px = max(float(sl_px), prev_sl)
+                else:
+                    sl_px = min(float(sl_px), prev_sl)
             try:
                 init_r = float(getattr(prev_pos, "initial_risk_r", 0.0) or 0.0)
                 if init_r <= 0 or not math.isfinite(init_r):

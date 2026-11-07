@@ -380,7 +380,13 @@ def validate_and_adjust_tp_sl(
 
     返回 (final_sl, final_tp, valid)。
     """
+    if not (current_price and math.isfinite(current_price) and current_price > 0):
+        return None, None, False
+    if not (local_stop_loss and math.isfinite(local_stop_loss) and local_stop_loss > 0):
+        return None, None, False
     sl_local_dist = abs(current_price - local_stop_loss)
+    if sl_local_dist <= 1e-6:
+        return None, None, False
 
     # --- SL: 方向校验 + 幅度截断 ---
     final_sl = ai_stop_loss
@@ -730,6 +736,8 @@ _BREAKDOWN_LABELS = {
     "near_level": "关键价位",
     "divergence": "指标背离",
     "fr_hot": "资金费率",
+    "macro_bias": "宏观态惩罚",
+    "micro_break": "微观止跌突破",
     "no_signal": "无信号原因",
     "veto_macro_conflict": "宏观拦截",
     "veto_rr": "盈亏比拦截",
@@ -746,6 +754,8 @@ def _direction_votes(df_5m: pd.DataFrame, macro_state: Optional[MacroState] = No
        - 做空：反弹 5m BB中轨(EMA20)附近 (price >= bb_mid * 0.998)、RSI 回弹至 45~55 中性区、当根 K 线收出顺势企稳阴线 (close <= open)；
     2. 其他状态 (NEUTRAL / LEAN_LONG / LEAN_SHORT) 保持原均值回归极值条件 (BB触轨 / RSI极值 / CCI极值)。
     """
+    if df_5m is None or df_5m.empty or len(df_5m) < 20:
+        return 0, 0
     closes = df_5m["close"]
     bb_upper, bb_mid, bb_lower = utils.bollinger(closes, 20, 2.0)
     rsi_5m = utils.rsi(closes, 14)
@@ -917,6 +927,17 @@ def calculate_signal_score(
     """
     计算本地信号分 SS。
     """
+    if df_5m is None or df_5m.empty or len(df_5m) < 20:
+        return {
+            "score": 0.0,
+            "direction": None,
+            "rr_ratio": 0.0,
+            "raw_sl": None,
+            "raw_tp": None,
+            "status": STATUS_NO_DIRECTION,
+            "breakdown": {"no_signal": "5m K线数据不足(需至少20根)"}
+        }
+
     breakdown = {"base": BASE_SCORE}
 
     direction = _pick_direction(df_5m, macro_state=macro_state)

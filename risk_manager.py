@@ -440,7 +440,7 @@ class RiskManager:
                 if self.metrics.win_rate <= 0 or mean_r <= 0:
                     max_probe_risk = current_eq * (self.config.min_single_risk_pct / 100.0) * 1.5
                     if risk_amt > max_probe_risk:
-                        return False, f"策略处于负期望区间 (μ_R={mean_r:.3f})，仅允许探针仓位 (超限 {risk_amt:.2f} > {max_probe_risk:.2f})"
+                        return False, f"策略处于负期望区间 (策略数学期望为负: μ_R={mean_r:.3f})，仅允许探针仓位 (超限 {risk_amt:.2f} > {max_probe_risk:.2f})"
                 
             if reserve_slot and coin:
                 self.reserve_position_slot(coin, risk_amt)

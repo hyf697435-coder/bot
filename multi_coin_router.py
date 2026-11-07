@@ -61,9 +61,10 @@ class CoinSignal:
 
 
 class CorrelationTracker:
-    """币种相关性追踪器"""
+    """币种相关性追踪器（线程安全保护）"""
     
     def __init__(self, lookback_days: int = 30):
+        self._lock = threading.RLock()
         self.lookback_days = lookback_days
         self.price_history: Dict[str, List[Tuple[int, float]]] = {}  # {coin: [(ts, price)]}
         
@@ -71,21 +72,22 @@ class CorrelationTracker:
         """从历史 DataFrame 快速播种价格历史并按时间戳去重"""
         if df is None or not isinstance(df, pd.DataFrame) or df.empty or "ts" not in df.columns or "close" not in df.columns:
             return
-        try:
-            ts_series = pd.to_numeric(df["ts"], errors='coerce').dropna().astype(int)
-            close_series = pd.to_numeric(df["close"], errors='coerce')
-            if ts_series.empty or close_series.empty:
-                return
-            last_ts = int(ts_series.iloc[-1])
-            cutoff = last_ts - self.lookback_days * 86400000
-            
-            valid_mask = (ts_series >= cutoff) & (close_series > 0) & np.isfinite(close_series)
-            filtered_ts = ts_series[valid_mask].tolist()
-            filtered_close = close_series[valid_mask].tolist()
-            dedup = dict(zip(filtered_ts, filtered_close))
-            self.price_history[coin] = sorted(dedup.items(), key=lambda x: x[0])
-        except Exception as e:
-            logger.warning("[MultiCoin] seed_from_df 异常 | coin=%s | err=%s", coin, e)
+        with self._lock:
+            try:
+                ts_series = pd.to_numeric(df["ts"], errors='coerce').dropna().astype(int)
+                close_series = pd.to_numeric(df["close"], errors='coerce')
+                if ts_series.empty or close_series.empty:
+                    return
+                last_ts = int(ts_series.iloc[-1])
+                cutoff = last_ts - self.lookback_days * 86400000
+                
+                valid_mask = (ts_series >= cutoff) & (close_series > 0) & np.isfinite(close_series)
+                filtered_ts = ts_series[valid_mask].tolist()
+                filtered_close = close_series[valid_mask].tolist()
+                dedup = dict(zip(filtered_ts, filtered_close))
+                self.price_history[coin] = sorted(dedup.items(), key=lambda x: x[0])
+            except Exception as e:
+                logger.warning("[MultiCoin] seed_from_df 异常 | coin=%s | err=%s", coin, e)
 
     def update(self, coin: str, timestamp_ms: int, price: float):
         """更新价格历史 (去重防止同一根 1h K线在 1 小时内被重复插入，且设置硬性长度上限避免列表重建 OOM)"""
@@ -99,23 +101,24 @@ class CorrelationTracker:
         except (ValueError, TypeError):
             return
 
-        if coin not in self.price_history:
-            self.price_history[coin] = []
+        with self._lock:
+            if coin not in self.price_history:
+                self.price_history[coin] = []
 
-        history = self.price_history[coin]
-        if history and history[-1][0] == timestamp_ms:
-            history[-1] = (timestamp_ms, price)
-            return
+            history = self.price_history[coin]
+            if history and history[-1][0] == timestamp_ms:
+                history[-1] = (timestamp_ms, price)
+                return
 
-        history.append((timestamp_ms, price))
+            history.append((timestamp_ms, price))
 
-        # 30 天 1h K 线最多约 720 根，硬限 1000 根防爆
-        max_bars = self.lookback_days * 24 + 100
-        if len(history) > max_bars:
-            cutoff_ms = timestamp_ms - self.lookback_days * 24 * 3600 * 1000
-            self.price_history[coin] = [
-                (ts, p) for ts, p in history if ts >= cutoff_ms
-            ][-max_bars:]
+            # 30 天 1h K 线最多约 720 根，硬限 1000 根防爆
+            max_bars = self.lookback_days * 24 + 100
+            if len(history) > max_bars:
+                cutoff_ms = timestamp_ms - self.lookback_days * 24 * 3600 * 1000
+                self.price_history[coin] = [
+                    (ts, p) for ts, p in history if ts >= cutoff_ms
+                ][-max_bars:]
     
     def get_correlation(self, coin1: str, coin2: str) -> float:
         """
@@ -126,11 +129,11 @@ class CorrelationTracker:
           0.0 = 无相关
          -1.0 = 完全负相关
         """
-        if coin1 not in self.price_history or coin2 not in self.price_history:
-            return 0.0
-        
-        hist1 = self.price_history[coin1]
-        hist2 = self.price_history[coin2]
+        with self._lock:
+            if coin1 not in self.price_history or coin2 not in self.price_history:
+                return 0.0
+            hist1 = list(self.price_history[coin1])
+            hist2 = list(self.price_history[coin2])
         
         if len(hist1) < 20 or len(hist2) < 20:
             return 0.0
@@ -228,7 +231,16 @@ class MultiCoinRouter:
         """评估单个币种信号（严格对齐 strategy.calculate_signal_score 签名与返回键）"""
         try:
             market = self.market_clients[coin]
-            df_5m, price = market.get_closed_ohlcv("5m", 120, use_cache=False)
+            try:
+                ohlcv_res = market.get_closed_ohlcv("5m", 120, use_cache=False)
+                if isinstance(ohlcv_res, (tuple, list)) and len(ohlcv_res) >= 2:
+                    df_5m, price = ohlcv_res[0], float(ohlcv_res[1])
+                else:
+                    df_5m = market.get_ohlcv("5m", 120)
+                    price = float(df_5m["close"].iloc[-1]) if (df_5m is not None and not df_5m.empty) else 0.0
+            except Exception:
+                df_5m = market.get_ohlcv("5m", 120)
+                price = float(df_5m["close"].iloc[-1]) if (df_5m is not None and not df_5m.empty) else 0.0
             df_1h = market.get_ohlcv("1h", 500)
             df_4h = market.get_ohlcv("4h", 500)
             fr_stats = market.get_funding_stats(168)
@@ -239,7 +251,11 @@ class MultiCoinRouter:
                 self.corr_tracker.update(coin, int(closed_1h["ts"]), float(closed_1h["close"]))
 
             # 计算单币种 TRS 趋势强度并映射各币种专属宏观状态
-            trs = calculate_trs_fn(df_1h, df_4h, fr_stats, price)
+            try:
+                trs_raw = calculate_trs_fn(df_1h, df_4h, fr_stats, price)
+                trs = float(trs_raw) if (trs_raw is not None and math.isfinite(float(trs_raw))) else 0.0
+            except Exception:
+                trs = 0.0
             try:
                 from strategy import map_trs_to_state
                 coin_macro = map_trs_to_state(trs)
@@ -376,13 +392,16 @@ class MultiCoinRouter:
         if new_signal.coin == self.current_position.coin:
             return False
         
-        score_delta = new_signal.score - self.current_position.entry_score
+        cur_score = float(getattr(self.current_position, "entry_score", None) or getattr(self.current_position, "score", 0.0) or 0.0)
+        new_score = float(getattr(new_signal, "ranking_score", None) or getattr(new_signal, "score", 0.0) or 0.0)
+        
+        score_delta = new_score - cur_score
         
         if score_delta >= self.switch_threshold:
             logger.info(
                 f"[MultiCoin] 触发仓位切换 | "
-                f"当前: {self.current_position.coin} (分数={self.current_position.entry_score:.1f}) | "
-                f"新信号: {new_signal.coin} (分数={new_signal.score:.1f}) | "
+                f"当前: {self.current_position.coin} (分数={cur_score:.1f}) | "
+                f"新信号: {new_signal.coin} (分数={new_score:.1f}) | "
                 f"差值={score_delta:.1f} >= 阈值={self.switch_threshold}"
             )
             return True
