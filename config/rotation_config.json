@@ -1,0 +1,59 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "version": "1.0.0",
+  "rotation": {
+    "shift_duration_hours": 6,
+    "handover_lead_minutes": 10,
+    "max_run_limit_minutes": 480,
+    "ring_nodes": ["bot-node-a", "bot-node-b"]
+  },
+  "nodes": {
+    "bot-node-a": {
+      "provider": "instabox",
+      "machine_name": "bot-node-a",
+      "api_key_env": "INSTABOX_API_KEY_A",
+      "workdir": "/data/home/trading-bot"
+    },
+    "bot-node-b": {
+      "provider": "instabox",
+      "machine_name": "bot-node-b",
+      "api_key_env": "INSTABOX_API_KEY_B",
+      "workdir": "/data/home/trading-bot"
+    }
+  },
+  "state_sync": {
+    "mandatory_files": [
+      "state.json",
+      "risk_state_aggressive.json",
+      "equity_history_risk_state_aggressive.json"
+    ],
+    "optional_files": [
+      "news_sentiment_cache.json",
+      "correlation_matrix.json"
+    ],
+    "staging_dir": "./sync_staging"
+  },
+  "lock": {
+    "file_path": "state/rotation.lock.json",
+    "ttl_seconds": 600,
+    "stale_timeout_seconds": 900
+  },
+  "supervisor": {
+    "heartbeat_file": ".heartbeat",
+    "check_interval_seconds": 10,
+    "heartbeat_timeout_seconds": 150,
+    "ai_phase_timeout_seconds": 180,
+    "halt_timeout_seconds": 600,
+    "sigterm_timeout_seconds": 15,
+    "max_restarts_per_hour": 5,
+    "restart_backoff_base_seconds": 5,
+    "max_drawdown_limit_pct": 30.0,
+    "daily_loss_limit_pct": 15.0
+  },
+  "health_check": {
+    "http_timeout_seconds": 10,
+    "exchange_info_endpoint": "https://api.hyperliquid.xyz/info",
+    "max_acceptable_latency_ms": 2500,
+    "min_free_disk_mb": 500
+  }
+}

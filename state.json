@@ -1,76 +1,80 @@
 {
   "state": "IDLE",
   "coin": "ETH",
-  "daily_start_equity": 1000.0,
-  "daily_loss_date": "2026-11-07",
+  "daily_start_equity": 858.67,
+  "daily_loss_date": "2026-11-13",
   "daily_loss_pnl": 0.0,
-  "quant_state": "NEUTRAL",
-  "final_macro_state": "NEUTRAL",
-  "cached_ai_macro_state": "NEUTRAL",
-  "last_trs": -0.16558999450419146,
-  "news_impact": "Fear index at 28 and Binance $6.3B hack headline signal acute systemic contagion risk still unfolding; market has not yet priced structural liquidity/custody tail risk despite 7.8% local bounce.",
+  "quant_state": "LEAN_SHORT",
+  "final_macro_state": "LEAN_SHORT",
+  "cached_ai_macro_state": "LEAN_SHORT",
+  "last_trs": -0.39692949421906365,
+  "news_impact": "Extreme Fear (20) aligns with technical weakness; thin liquidity and ETF outflows signal ongoing distribution rather than capitulation bounce. No systemic contagion evident—fear appears priced into current structure.",
   "sentiment": {
     "status": "ok",
-    "timestamp": 1793981001.1889544,
-    "updated_at": "2026-11-06 16:03:25 UTC",
+    "timestamp": 1794556904.9557896,
+    "updated_at": "2026-11-13 08:01:48 UTC",
     "fear_and_greed": {
-      "value": 28,
-      "classification": "Fear"
+      "value": 20,
+      "classification": "Extreme Fear"
     },
     "top_headlines_24h": [
-      "What Democrats’ US midterm sweep means for the CLARITY Act (Fri, 06 Nov 2026 14:30:00 +0000)",
-      "Nigeria sets new crypto licensing rules, bans algorithmic stablecoins (Fri, 06 Nov 2026 13:57:14 +0000)",
-      "Here’s what happened in crypto today (Fri, 06 Nov 2026 13:33:00 +0000)",
-      "Ethereum devs won’t fork Glamsterdam on Hoodi until smart contract risks resolved (Fri, 06 Nov 2026 13:23:08 +0000)",
-      "Solana’s Shanghai event halted over unauthorized promotion: Report (Fri, 06 Nov 2026 12:15:28 +0000)",
-      "Binance hackers had 8 weeks of access before $6.3B exploit, Security Alliance estimates (Fri, 06 Nov 2026 11:26:30 +0000)"
+      "Here’s what happened in crypto today (Fri, 13 Nov 2026 06:16:46 +0000)",
+      "Bitcoin slides below $70K amid thin liquidity, ETF outflows (Fri, 13 Nov 2026 06:00:15 +0000)",
+      "Trump nominates Hester Peirce successor among SEC, CFTC picks (Fri, 13 Nov 2026 02:29:27 +0000)",
+      "Former Nvidia CEO Huang had third alleged affair: Reuters (Fri, 13 Nov 2026 01:26:27 +0000)",
+      "Gemini’s quarterly retail trading volume sinks to 3-year low (Fri, 13 Nov 2026 00:52:42 +0000)",
+      "Maple Finance’s strategy rift sends co-founder, COO to the exits (Thu, 12 Nov 2026 23:12:55 +0000)"
     ]
   },
   "radar_scores": {
     "BTC": {
       "score": 0.0,
       "direction": "NEUTRAL",
-      "price": 75951.0,
-      "trs": -0.3651
+      "price": 69112.0,
+      "trs": -0.6563,
+      "atr": 250.1915
     },
     "ETH": {
       "score": 0.0,
       "direction": "NEUTRAL",
-      "price": 2256.5,
-      "trs": -0.1657
-    },
-    "SUI": {
-      "score": 0.0,
-      "direction": "NEUTRAL",
-      "price": 0.87485,
-      "trs": -0.1878
+      "price": 1897.4,
+      "trs": -0.4035,
+      "atr": 7.246
     },
     "ARB": {
       "score": 0.0,
       "direction": "NEUTRAL",
-      "price": 0.16526,
-      "trs": -0.1196
+      "price": 0.14577,
+      "trs": -0.4371,
+      "atr": 0.0004
+    },
+    "SUI": {
+      "score": 0.0,
+      "direction": "NEUTRAL",
+      "price": 0.80059,
+      "trs": -0.4058,
+      "atr": 0.0025
     }
   },
   "coin_prices": {
-    "BTC": 75951.0,
-    "ETH": 2256.5,
-    "SUI": 0.87485,
-    "ARB": 0.16526
+    "BTC": 69112.0,
+    "ETH": 1897.4,
+    "ARB": 0.14577,
+    "SUI": 0.80059
   },
   "last_macro_slot": [
-    "2026-11-06",
-    16
+    "2026-11-13",
+    8
   ],
-  "last_event_macro_time": "2026-11-06T15:25:02.000575+00:00",
-  "last_evaluated_candle_time": 1794018300000,
+  "last_event_macro_time": "2026-11-13T03:37:04.811490+00:00",
+  "last_evaluated_candle_time": 1794558000000,
   "last_ai_trade_call_ts": 1794018016.848813,
   "consecutive_failures": 0,
   "cooldown_until": null,
   "last_closed_pnl": -0.006114615618991623,
   "open_regime_cap": 1.5,
   "last_synced_sl": null,
-  "cached_atr_5m": 213.72628640898196,
+  "cached_atr_5m": 7.2459555172491195,
   "position": null,
   "position_entry_price": null,
   "position_direction": null

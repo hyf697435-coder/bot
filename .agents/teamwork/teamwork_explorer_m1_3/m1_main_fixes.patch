@@ -1,0 +1,99 @@
+--- a/main.py
++++ b/main.py
+@@ -229,6 +229,8 @@
+         self.api_error_count = 0
+         self.idle_api_error_count = 0
+         self.idle_backoff = 60
++        self.internal_error_count = 0
++        self.last_internal_error_alert_time: float = 0.0
+ 
+         # --- 分级轮询节流与日志降噪游标 ---
+         self.last_idle_reconcile: Optional[datetime] = None
+@@ -533,7 +535,16 @@
+             return
+ 
+         # 节点命中可观测性: 每个信号节点至少落一条 INFO, 并比对 5m K 线时间戳是否滚动
+-        current_candle_time = int(pd.to_numeric(df_5m["ts"].iloc[-1], errors='coerce'))
++        try:
++            if "pd" in globals() and hasattr(pd, "to_numeric"):
++                raw_ts = pd.to_numeric(df_5m["ts"].iloc[-1], errors="coerce")
++                current_candle_time = int(raw_ts) if pd.notna(raw_ts) else int(time.time() * 1000)
++            else:
++                raw_ts = float(df_5m["ts"].iloc[-1])
++                current_candle_time = int(raw_ts) if math.isfinite(raw_ts) else int(time.time() * 1000)
++        except Exception as ts_err:
++            logger.warning("[巡检] 提取 5m K 线时间戳异常: %s | 回退为当前系统时间戳", ts_err)
++            current_candle_time = int(time.time() * 1000)
+         logger.info("[巡检] 命中信号节点 | node=%s | candle_ts=%s | prev_candle=%s "
+                     "| action=执行信号 Pipeline",
+                     node, current_candle_time, self.last_node_candle_time)
+@@ -827,6 +838,7 @@
+         self.api_error_count = 0
+         self.idle_api_error_count = 0
+         self.idle_backoff = 60
++        self.internal_error_count = 0
+ 
+     def _is_macro_schedule(self, now_utc: datetime) -> bool:
+         """UTC 00/08/16 定时槽位 (每槽位仅触发一次)。"""
+@@ -1460,10 +1472,48 @@
+             send_alert(f"紧急保护止损部署异常，需人工立即介入: {e}")
+ 
+     def _handle_loop_exception(self, e: Exception):
+-        """核心循环容错：持仓期连续异常触发保护兜底，空仓期指数退避。"""
++        """核心循环容错：分类处理内部软件缺陷与外部 API/网络异常。"""
++        # 1. 软件缺陷/内部代码异常分支 (Feature 2 & Feature 3)
++        internal_errors = (
++            NameError,
++            TypeError,
++            AttributeError,
++            SyntaxError,
++            IndexError,
++            KeyError,
++            ZeroDivisionError,
++            UnboundLocalError,
++            ReferenceError,
++        )
++        if isinstance(e, internal_errors):
++            self.internal_error_count = getattr(self, "internal_error_count", 0) + 1
++            logger.critical(
++                "[交易程序运行时异常] 核心循环发生软件缺陷/代码异常 | 计数=%s | err=%s",
++                self.internal_error_count,
++                e,
++                exc_info=True,
++            )
++            now_ts = time.time()
++            last_alert = getattr(self, "last_internal_error_alert_time", 0.0)
++            if now_ts - last_alert >= 1800 or self.internal_error_count == 1:
++                self.last_internal_error_alert_time = now_ts
++                send_alert(
++                    f"[交易程序运行时异常] 核心循环发生本地代码错误: {type(e).__name__}: {e}\n"
++                    f"请检查代码缺陷与调用栈，该错误不计入外部 API 异常计数。"
++                )
++            # 内部软件缺陷不增加 self.idle_api_error_count 与 self.api_error_count，避免虚假累加触发警报风暴
++            self._safe_sleep(10, phase="INTERNAL_EXC_BACKOFF", step=1.0)
++            return
++
++        # 2. 外部 API / 交易所网络 / 模型通道异常分支 (Feature 3: 包含 exc_info=True)
+         self.api_error_count += 1
+-        logger.error("[异常] 核心循环错误 | 计数=%s/%s | err=%s",
+-                     self.api_error_count, TRADING_ALERT_THRESHOLD, e)
++        logger.error(
++            "[异常] 核心循环外部/API错误 | 计数=%s/%s | err=%s",
++            self.api_error_count,
++            TRADING_ALERT_THRESHOLD,
++            e,
++            exc_info=True,
++        )
+ 
+         if self.state == STATE_TRADING:
+             if self.api_error_count >= TRADING_ALERT_THRESHOLD:
+@@ -1473,7 +1523,8 @@
+             self.idle_api_error_count += 1
+             if self.idle_api_error_count >= IDLE_ALERT_THRESHOLD:
+                 send_alert(
+-                    f"空仓期 API 连续异常 {self.idle_api_error_count} 次，请人工检查网络/AI 通道。")
++                    f"空仓期 API 连续异常 {self.idle_api_error_count} 次，请人工检查网络/AI 通道。"
++                )
+             logger.warning("[巡检] 空仓异常退避 | wait=%ss", self.idle_backoff)
+             self._safe_sleep(self.idle_backoff, phase="IDLE_BACKOFF")
+             self.idle_backoff = min(self.idle_backoff * 2, 600)

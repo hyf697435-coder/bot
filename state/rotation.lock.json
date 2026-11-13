@@ -1,0 +1,14 @@
+{
+  "lock_id": "lock-1794558239-8684",
+  "status": "ACTIVE_HELD",
+  "active_node": "bot-node-b",
+  "standby_node": "bot-node-a",
+  "owner": "node_supervisor",
+  "fencing_token": 9,
+  "acquired_at": "2026-11-13T08:23:59.844186+00:00",
+  "expires_at": "2027-11-13T08:23:59.844186+00:00",
+  "expires_at_ts": 1826094239.844186,
+  "ttl_seconds": 31536000,
+  "current_phase": 0,
+  "last_handover_success": "2026-11-13T08:23:59.844186+00:00"
+}

@@ -1,17 +1,17 @@
 {
   "status": "ok",
-  "timestamp": 1793981001.1889544,
-  "updated_at": "2026-11-06 16:03:25 UTC",
+  "timestamp": 1794556904.9557896,
+  "updated_at": "2026-11-13 08:01:48 UTC",
   "fear_and_greed": {
-    "value": 28,
-    "classification": "Fear"
+    "value": 20,
+    "classification": "Extreme Fear"
   },
   "top_headlines_24h": [
-    "What Democrats’ US midterm sweep means for the CLARITY Act (Fri, 06 Nov 2026 14:30:00 +0000)",
-    "Nigeria sets new crypto licensing rules, bans algorithmic stablecoins (Fri, 06 Nov 2026 13:57:14 +0000)",
-    "Here’s what happened in crypto today (Fri, 06 Nov 2026 13:33:00 +0000)",
-    "Ethereum devs won’t fork Glamsterdam on Hoodi until smart contract risks resolved (Fri, 06 Nov 2026 13:23:08 +0000)",
-    "Solana’s Shanghai event halted over unauthorized promotion: Report (Fri, 06 Nov 2026 12:15:28 +0000)",
-    "Binance hackers had 8 weeks of access before $6.3B exploit, Security Alliance estimates (Fri, 06 Nov 2026 11:26:30 +0000)"
+    "Here’s what happened in crypto today (Fri, 13 Nov 2026 06:16:46 +0000)",
+    "Bitcoin slides below $70K amid thin liquidity, ETF outflows (Fri, 13 Nov 2026 06:00:15 +0000)",
+    "Trump nominates Hester Peirce successor among SEC, CFTC picks (Fri, 13 Nov 2026 02:29:27 +0000)",
+    "Former Nvidia CEO Huang had third alleged affair: Reuters (Fri, 13 Nov 2026 01:26:27 +0000)",
+    "Gemini’s quarterly retail trading volume sinks to 3-year low (Fri, 13 Nov 2026 00:52:42 +0000)",
+    "Maple Finance’s strategy rift sends co-founder, COO to the exits (Thu, 12 Nov 2026 23:12:55 +0000)"
   ]
 }

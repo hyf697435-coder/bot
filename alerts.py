@@ -191,7 +191,46 @@ def setup_logging() -> logging.Logger:
 logger = setup_logging()
 
 
-def send_alert(message: str) -> None:
+def categorize_error(e: Exception) -> str:
+    """
+    错误归类判别器 (Feature 11 契约实现)：
+    严格区分交易所行情、交易所执行、AI中转站与程序内部运行时异常四类，杜绝模糊指代。
+    """
+    try:
+        from exchange import MarketDataError, ExecutionError
+    except ImportError:
+        MarketDataError = ExecutionError = ()
+    try:
+        from strategy import AIError
+    except ImportError:
+        AIError = ()
+    try:
+        import requests
+        req_err = (requests.RequestException,)
+    except ImportError:
+        req_err = ()
+    try:
+        import httpx
+        httpx_err = (httpx.HTTPError,)
+    except ImportError:
+        httpx_err = ()
+
+    internal_errs = (
+        NameError, TypeError, AttributeError, SyntaxError,
+        IndexError, KeyError, ZeroDivisionError, ImportError, UnboundLocalError
+    )
+    if isinstance(e, internal_errs):
+        return "[交易程序运行时异常]"
+    if ExecutionError and isinstance(e, ExecutionError):
+        return "[交易所下单执行异常]"
+    if (MarketDataError and isinstance(e, MarketDataError)) or (req_err and isinstance(e, req_err)) or (httpx_err and isinstance(e, httpx_err)):
+        return "[交易所行情异常]"
+    if AIError and isinstance(e, AIError):
+        return "[AI中转站异常]"
+    return "[交易程序运行时异常]"
+
+
+def send_alert(message: str, subject: Optional[str] = None) -> None:
     """系统级熔断 / 风控拦截 / 黑天鹅断网告警。
 
     统一记录日志，并在邮件通道就绪时转发一封邮件；未配置邮件时仅落日志。
@@ -200,7 +239,8 @@ def send_alert(message: str) -> None:
     logger.warning("[告警] %s", message)
     if notifier is not None and notifier.ready:
         try:
-            notifier.send("[交易机器人] 系统告警", message)
+            mail_subject = subject or "[交易机器人] 系统告警"
+            notifier.send(mail_subject, message)
         except Exception as e:  # noqa: BLE001
             logger.error("[告警] 邮件转发失败 | err=%s", e)
 

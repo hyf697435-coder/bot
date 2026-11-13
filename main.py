@@ -31,6 +31,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Deque, Optional, Tuple
 
 import numpy as np
+import pandas as pd
 
 try:
     from dotenv import load_dotenv
@@ -100,7 +101,7 @@ NETWORK_TIMEOUT_SECONDS = _env_float("NETWORK_TIMEOUT_SECONDS", 20)
 HEARTBEAT_SECONDS = _env_float("HEARTBEAT_SECONDS", 60)
 
 COOLDOWN_HOURS = _env_float("COOLDOWN_HOURS", 12)             # 连败休眠时长
-CONSECUTIVE_LOSS_LIMIT = 3                                    # 连败熔断阈值
+CONSECUTIVE_LOSS_LIMIT = _env_int("CONSECUTIVE_LOSS_LIMIT", 4)  # 连败熔断阈值 (支持环境变量与默认4次稳健防线)
 IDLE_ALERT_THRESHOLD = _env_int("IDLE_ALERT_THRESHOLD", 5)    # 空仓期连续异常告警阈值
 TRADING_ALERT_THRESHOLD = _env_int("TRADING_ALERT_THRESHOLD", 2)  # 持仓期连续异常保护阈值
 CLOSE_FAIL_ALERT_THRESHOLD = _env_int("CLOSE_FAIL_ALERT_THRESHOLD", 5)  # 平仓连续失败保护阈值
@@ -108,6 +109,21 @@ MAX_LOOPS = _env_int("MAX_LOOPS", 0)                          # 0 表示无限�
 MACRO_EVENT_COOLDOWN_SECONDS = _env_float("MACRO_EVENT_COOLDOWN_SECONDS", 900)
 HARD_STOP_ATR_BUFFER = _env_float("HARD_STOP_ATR_BUFFER", 0.2)
 STATE_FILE = os.getenv("STATE_FILE", "state.json").strip() or "state.json"
+
+# ==========================================
+# 错误分类规则 (M1: 内部代码缺陷 vs 外部API/网络故障)
+# ==========================================
+INTERNAL_SOFTWARE_ERRORS = (
+    NameError,
+    TypeError,
+    AttributeError,
+    SyntaxError,
+    IndexError,
+    KeyError,
+    ZeroDivisionError,
+    ImportError,
+    UnboundLocalError,
+)
 
 # 交易成本估算 (开平双边手续费 + 滑点)，用于连败判定不漏掉"暗亏"
 TRADING_FEE_RATE = _env_float("TRADING_FEE_RATE", 0.001)
@@ -144,15 +160,47 @@ def seconds_until_next_signal_node(now_ts: float) -> float:
 class TradingBot:
     """主控制器：Pipeline 编排 + 四状态防御体系。"""
 
-    def __init__(self):
+    @staticmethod
+    def _load_production_config(config_path: str = "config_aggressive.json"):
+        """加载生产环境实盘风控配置 (对齐去过拟合实盘稳健值与抗穿透保护)"""
+        from risk_manager import RiskConfig
+        if not config_path or not os.path.exists(config_path):
+            return RiskConfig()
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg_data = json.load(f)
+            rm = cfg_data.get("risk_management", {})
+            ps = cfg_data.get("position_sizing", {})
+            return RiskConfig(
+                kelly_fraction=float(ps.get("kelly_fraction", 0.20)),
+                single_risk_pct=float(rm.get("single_risk_pct", 2.0)),
+                max_portfolio_heat_pct=float(rm.get("max_portfolio_heat_pct", 30.0)),
+                max_drawdown_pct=float(rm.get("max_drawdown_pct", 30.0)),
+                daily_loss_limit_pct=float(rm.get("daily_loss_limit_pct", 15.0)),
+                max_consecutive_losses=int(rm.get("consecutive_loss_limit", 4)),
+                cooldown_hours_after_streak=float(rm.get("cooldown_hours_after_streak", 12.0)),
+                breakeven_profit_r=float(ps.get("breakeven_profit_r", 1.05)),
+                breakeven_margin=float(cfg_data.get("trading_costs", {}).get("roundtrip_friction", 0.0020)) + 0.0005,
+                trailing_start_r=float(ps.get("trailing_start_r", 1.45)),
+                trailing_atr_multiplier=float(ps.get("trailing_atr_multiplier", 2.35)),
+                max_holding_bars=int(ps.get("max_holding_bars", 45)),
+                time_decay_profit_threshold_r=float(ps.get("time_decay_threshold_r", 0.80)),
+            )
+        except Exception as e:
+            logger.warning("[配置] 加载生产风控配置异常: %s | 回退至基础默认配置", e)
+            return RiskConfig()
+
+    def __init__(self, config_path: str = "config_aggressive.json"):
+        self.config_path = config_path
         self.coin = COIN
         self.market = MarketData(coin=self.coin)
         self.exchange = HyperliquidExecutor()
         self.ai = AIClient()
         from multi_coin_router import MultiCoinRouter
         from risk_manager import RiskManager
-        self.router = MultiCoinRouter(config_path="config_aggressive.json")
-        self.risk_mgr = RiskManager(persistence_file="risk_state_aggressive.json")
+        self.router = MultiCoinRouter(config_path=self.config_path)
+        risk_cfg = self._load_production_config(self.config_path)
+        self.risk_mgr = RiskManager(config=risk_cfg, persistence_file="risk_state_aggressive.json")
         self._preheat_correlations()
         self.initial_equity: float = 1000.0
         self.peak_equity: float = 1000.0
@@ -196,6 +244,11 @@ class TradingBot:
         self.api_error_count = 0
         self.idle_api_error_count = 0
         self.idle_backoff = 60
+        self.internal_error_count = 0
+        self.last_internal_error_alert_time: float = 0.0
+        self.last_idle_api_alert_time: float = 0.0
+        self.last_radar_scan_time: float = 0.0
+        self.last_trading_radar_scan: float = 0.0
 
         # --- 分级轮询节流与日志降噪游标 ---
         self.last_idle_reconcile: Optional[datetime] = None
@@ -459,11 +512,37 @@ class TradingBot:
             self.last_idle_reconcile = now_utc
             if self._reconcile_exchange_position():
                 return
+            # 定期同步真实账户权益与切日状态至 RiskManager (Feature 21)
+            if hasattr(self, "risk_mgr") and self.risk_mgr:
+                try:
+                    acc_val = self.exchange.account_value()
+                    if acc_val and acc_val > 0:
+                        self.risk_mgr.sync_equity(acc_val)
+                        self.daily_start_equity = self.risk_mgr.daily_start_equity
+                        self.daily_loss_date = self.risk_mgr.daily_loss_date
+                        self.daily_loss_pnl = self.risk_mgr.daily_pnl
+                except Exception:
+                    pass
+
+        # 在空仓轻量轮询期间，若距上次雷达全量评估已超过 60s，刷新各币打分与现价 (Feature 23)
+        if hasattr(self, "router") and self.router and (now_ts - getattr(self, "last_radar_scan_time", 0.0)) >= 60.0:
+            try:
+                _, all_radar_scores, all_prices = self.router.scan_all_coins(
+                    calculate_signal_score, calculate_quant_trs, self.final_macro_state
+                )
+                if all_radar_scores:
+                    self.radar_scores = all_radar_scores
+                    self.coin_prices = all_prices
+                    self.last_radar_scan_time = now_ts
+                    self._persist_state()
+            except Exception as e:
+                logger.debug("[多币雷达] 周期刷新异常: %s", e)
 
         # 2. 信号节点门控: 仅当跨过新的 "5m K 线收盘 +2s" 节点时才跑完整信号 Pipeline,
         #    其余轮询只做上面的轻量对账, 避免 5s 高频空转拉行情 / 调用 AI。
         node = signal_node_index(now_ts)
         if node == self.last_signal_node:
+            self._reset_idle_counters()
             return
         if self.last_signal_node > -(10 ** 11):
             missed = node - self.last_signal_node - 1
@@ -489,10 +568,15 @@ class TradingBot:
 
         # 3. 刷新行情数据 (5m, 1h, 4h, Funding Rate)
         #    5m K 线是信号评估的物理基准, 必须绕过本地缓存并使用 get_closed_ohlcv 进行时间戳严格闭合判定
-        df_5m, price = self.market.get_closed_ohlcv("5m", 120, use_cache=False)
-        df_1h = self.market.get_ohlcv("1h", 500)
-        df_4h = self.market.get_ohlcv("4h", 500)
-        fr_stats = self.market.get_funding_stats(FR_WINDOW_HOURS)
+        try:
+            df_5m, price = self.market.get_closed_ohlcv("5m", 120, use_cache=False)
+            df_1h = self.market.get_ohlcv("1h", 500)
+            df_4h = self.market.get_ohlcv("4h", 500)
+            fr_stats = self.market.get_funding_stats(FR_WINDOW_HOURS)
+        except MarketDataError as me:
+            logger.warning("[巡检] 5m 节点拉取交易所行情失败 | coin=%s | action=跳过本轮5m评估等待下个节点 | err=%s", self.coin, me)
+            self.last_signal_node = prev_signal_node
+            return
 
         if df_5m is None or df_5m.empty or "ts" not in df_5m.columns or len(df_5m) < 15:
             logger.warning("[巡检] 5m K 线数据不足 | action=跳过本轮并允许重试")
@@ -500,7 +584,27 @@ class TradingBot:
             return
 
         # 节点命中可观测性: 每个信号节点至少落一条 INFO, 并比对 5m K 线时间戳是否滚动
-        current_candle_time = int(pd.to_numeric(df_5m["ts"].iloc[-1], errors='coerce'))
+        # 防御性提取时间戳: 容忍 pd 缺失、Series 异常、NaN、缺失索引等极端情况
+        current_candle_time: Optional[int] = None
+        try:
+            ts_series = df_5m["ts"]
+            last_ts = ts_series.iloc[-1] if hasattr(ts_series, "iloc") else ts_series[-1]
+            if "pd" in globals() and hasattr(pd, "to_numeric"):
+                num_ts = pd.to_numeric(last_ts, errors="coerce")
+                if pd.notna(num_ts):
+                    current_candle_time = int(num_ts)
+            if current_candle_time is None and last_ts is not None:
+                float_ts = float(last_ts)
+                if math.isfinite(float_ts):
+                    current_candle_time = int(float_ts)
+        except Exception as ts_err:
+            logger.warning("[巡检] 5m K 线时间戳解析异常: %s | action=估算为当前系统时间戳", ts_err)
+            current_candle_time = int(time.time() * 1000)
+
+        if current_candle_time is None:
+            logger.warning("[巡检] 5m K 线时间戳为 NaN/None 无效值 | action=估算为当前系统时间戳")
+            current_candle_time = int(time.time() * 1000)
+
         logger.info("[巡检] 命中信号节点 | node=%s | candle_ts=%s | prev_candle=%s "
                     "| action=执行信号 Pipeline",
                     node, current_candle_time, self.last_node_candle_time)
@@ -513,6 +617,11 @@ class TradingBot:
 
         atr_calc = utils.atr(df_5m["high"], df_5m["low"], df_5m["close"], 14)
         atr_14 = float(atr_calc) if (atr_calc is not None and math.isfinite(atr_calc)) else 0.0
+        if price and price > 0 and (atr_14 <= 0 or (atr_14 / price) > 0.04 or (atr_14 / price) < 0.0002):
+            logger.warning("[巡检] 5m ATR 偏离合理区间 (%.4f, 占比 %.2f%%) | 校准为基准比例值",
+                           atr_14, (atr_14 / price) * 100 if atr_14 > 0 else 0)
+            atr_14 = max(price * 0.0020, 1e-4)
+        self.cached_atr_5m = atr_14  # 同步刷新空仓期当前币种 5m ATR 缓存
         if atr_14 <= 0:
             logger.warning("[巡检] 5m ATR 不可用 | action=跳过本轮并允许重试")
             self.last_signal_node = prev_signal_node
@@ -530,9 +639,11 @@ class TradingBot:
         )
         # 冷启动基线: 无 AI_macro 缓存时立即调用一次 API 建立护栏基线，
         # 避免首次运行 (或 SYSTEM_HALT 重启清除缓存后) 在最长 8h 内完全没有 AI 护栏。
-        cold_start = self.cached_ai_macro_state is None
-        scheduled = self._is_macro_schedule(now_utc)
-        should_call_macro = cold_start or scheduled or (event_trigger and event_cooled)
+        now_mono = time.time()
+        relay_cooldown = (now_mono - getattr(self, "_last_llm_failure_time", 0.0)) < 900.0  # 15分钟冷却
+        cold_start = (self.cached_ai_macro_state is None) and not relay_cooldown
+        scheduled = self._is_macro_schedule(now_utc) and not relay_cooldown
+        should_call_macro = (cold_start or scheduled or (event_trigger and event_cooled)) and not relay_cooldown
         if event_trigger and not event_cooled:
             logger.debug("[宏观] 变盘事件冷却中 | action=沿用缓存 AI_macro 护栏")
 
@@ -550,8 +661,13 @@ class TradingBot:
             else:
                 ai_state = ai_res
 
-            # 校验 ai_state 必须属于有效的 MacroState 枚举类型
-            if isinstance(ai_state, MacroState):
+            # Feature 7 & 8: AI_macro 降级与中转站冷却
+            if ai_state is None:
+                self._last_llm_failure_time = now_mono
+                if self.cached_ai_macro_state is None:
+                    self.cached_ai_macro_state = self.quant_state
+                    logger.info("[宏观] AI_macro 中转站未响应 | 安全降级为本地量化态 (%s) 并启用 15m 冷却", self.quant_state.value)
+            elif isinstance(ai_state, MacroState):
                 if ai_state == MacroState.SYSTEM_HALT:
                     self.cached_ai_macro_state = ai_state
                     self._enter_system_halt("AI_macro 触发 SYSTEM_HALT")
@@ -563,8 +679,7 @@ class TradingBot:
                 except ValueError:
                     logger.warning("[宏观] AI_macro 返回未知宏观状态字符串: %s | 忽略更新", ai_state)
             else:
-                if ai_state is not None:
-                    logger.warning("[宏观] AI_macro 返回非法类型: %s | 忽略更新", type(ai_state))
+                logger.warning("[宏观] AI_macro 返回非法类型: %s | 忽略更新", type(ai_state))
             if scheduled:
                 self.last_macro_slot = (now_utc.date(), now_utc.hour)
             if event_trigger:
@@ -629,10 +744,17 @@ class TradingBot:
                     raw_signal_result=signal_res
                 ))
 
-        if getattr(self, "_last_persisted_candle", None) != current_candle_time:
-            self._last_persisted_candle = current_candle_time
-            self.last_evaluated_candle_time = current_candle_time
-            self._persist_state()
+        # 定期采样权益历史 (Feature 24 契约对齐)
+        if hasattr(self, "risk_mgr") and self.risk_mgr:
+            try:
+                real_eq = self.exchange.account_value() if (hasattr(self.exchange, "ready") and self.exchange.ready) else self.risk_mgr.current_equity
+            except Exception:
+                real_eq = self.risk_mgr.current_equity
+            self.risk_mgr.sample_equity_history(current_equity=real_eq, timestamp=current_candle_time)
+
+        self._last_persisted_candle = current_candle_time
+        self.last_evaluated_candle_time = current_candle_time
+        self._persist_state()
 
         # 7. 多币种候选信号门槛过滤与自动择优 (SS >= 70)
         if not signals:
@@ -677,11 +799,11 @@ class TradingBot:
 
         logger.info("%s", format_signal_report(signal_res, SIGNAL_GATE, "TRIGGERED"))
 
-        # [门禁强化 1: 本地硬代码门槛] 严格强制 SS >= 70.0，绝不让平庸信号透传给大模型浪费 Token
+        # [门禁强化 1: 本地硬代码门槛] 严格强制 SS >= SIGNAL_GATE，绝不让平庸信号透传给大模型浪费 Token
         candidate_score = float(signal_res.get("score", 0.0))
-        if candidate_score < 70.0:
-            logger.info("[门禁拦截] 胜出标的 %s 本地信号分 %.1f < 70.0 门槛 | action=本地直接丢弃，严禁调用 AI_Trade 浪费 Token",
-                        self.coin, candidate_score)
+        if candidate_score < SIGNAL_GATE:
+            logger.info("[门禁拦截] 胜出标的 %s 本地信号分 %.1f < %.1f 门槛 | action=本地直接丢弃，严禁调用 AI_Trade 浪费 Token",
+                        self.coin, candidate_score, SIGNAL_GATE)
             self._reset_idle_counters()
             return
 
@@ -794,6 +916,7 @@ class TradingBot:
         self.api_error_count = 0
         self.idle_api_error_count = 0
         self.idle_backoff = 60
+        self.internal_error_count = 0
 
     def _is_macro_schedule(self, now_utc: datetime) -> bool:
         """UTC 00/08/16 定时槽位 (每槽位仅触发一次)。"""
@@ -993,6 +1116,27 @@ class TradingBot:
             self._safe_sleep(TRADING_POLL_SECONDS, phase="TRADING_POLL", step=0.5)
             return
 
+        # 持仓期定期刷新多币雷达与权益历史采样 (每 60s) (Feature 23 & Feature 24)
+        if (now_utc.timestamp() - getattr(self, "last_trading_radar_scan", 0.0)) >= 60.0:
+            self.last_trading_radar_scan = now_utc.timestamp()
+            if hasattr(self, "router") and self.router:
+                try:
+                    _, all_radar_scores, all_prices = self.router.scan_all_coins(
+                        calculate_signal_score, calculate_quant_trs, self.final_macro_state
+                    )
+                    if all_radar_scores:
+                        self.radar_scores = all_radar_scores
+                        self.coin_prices = all_prices
+                        self._persist_state()
+                except Exception as e:
+                    logger.debug("[多币雷达] 持仓期刷新异常: %s", e)
+            if hasattr(self, "risk_mgr") and self.risk_mgr:
+                try:
+                    real_eq = self.exchange.account_value() if (hasattr(self.exchange, "ready") and self.exchange.ready) else self.risk_mgr.current_equity
+                except Exception:
+                    real_eq = self.risk_mgr.current_equity
+                self.risk_mgr.sample_equity_history(current_equity=real_eq, timestamp=now_utc.timestamp())
+
         # 3. ATR / 5m K 线缓存刷新 (低频) + bars_held 推进 (5m K 线边界)
         if self.last_atr_refresh is None or \
                 (now_utc - self.last_atr_refresh).total_seconds() >= ATR_REFRESH_SECONDS:
@@ -1015,7 +1159,18 @@ class TradingBot:
         current_atr = self.cached_atr_5m
 
         # 4. 本地 FSM 决策 (保留时间衰减与止损上移；常规止损止盈优先交由交易所撮合)
-        action = update_position_fsm(self.position, price, current_atr)
+        rm_cfg = getattr(self.risk_mgr, "config", None)
+        action = update_position_fsm(
+            self.position,
+            price,
+            current_atr,
+            trail_atr_mult=getattr(rm_cfg, "trailing_atr_multiplier", None),
+            time_decay_bars=getattr(rm_cfg, "max_holding_bars", None),
+            time_decay_min_r=getattr(rm_cfg, "time_decay_profit_threshold_r", None),
+            break_even_r=getattr(rm_cfg, "breakeven_profit_r", None),
+            break_even_margin=getattr(rm_cfg, "breakeven_margin", None),
+            trail_start_r=getattr(rm_cfg, "trailing_start_r", None),
+        )
 
         if action == "CLOSE_TP" and getattr(self.exchange, "_tp_oid", None) is not None:
             # 交易所侧已挂载 Maker 限价止盈单，等待交易所优先成交
@@ -1289,6 +1444,7 @@ class TradingBot:
         self.last_atr_refresh = None
         self.last_synced_sl = None
         self.last_5m_ts = None
+        self.cached_atr_5m = 0.0  # 平仓后清空持仓 ATR 缓存 (Feature 25)
         self.close_fail_count = 0
         self.state = STATE_IDLE
         
@@ -1416,10 +1572,47 @@ class TradingBot:
             send_alert(f"紧急保护止损部署异常，需人工立即介入: {e}")
 
     def _handle_loop_exception(self, e: Exception):
-        """核心循环容错：持仓期连续异常触发保护兜底，空仓期指数退避。"""
+        """核心循环容错：区分代码内部缺陷与外部 API 异常，持仓期连续异常触发保护兜底，空仓期指数退避。"""
+        # 1. 软件缺陷/内部代码异常分支 (Feature 2 & Feature 3)
+        if isinstance(e, INTERNAL_SOFTWARE_ERRORS):
+            self.internal_error_count = getattr(self, "internal_error_count", 0) + 1
+            logger.critical(
+                "[交易程序运行时异常] 核心循环捕获内部代码缺陷 | state=%s | 计数=%s | err=%s: %s",
+                self.state,
+                self.internal_error_count,
+                type(e).__name__,
+                e,
+                exc_info=True,
+            )
+            now_ts = time.time()
+            last_alert = getattr(self, "last_internal_error_alert_time", 0.0)
+            if self.internal_error_count == 1 or now_ts - last_alert >= 1800:
+                self.last_internal_error_alert_time = now_ts
+                send_alert(
+                    f"[交易程序运行时异常] 核心循环发生本地代码错误: {type(e).__name__}: {e}\n"
+                    f"请检查代码缺陷与调用栈，该错误不计入外部 API 异常计数。"
+                )
+            # 内部软件缺陷绝不增加 idle_api_error_count 与 api_error_count，避免虚假累加触发警报风暴
+            if self.state == STATE_TRADING:
+                self._safe_sleep(10, phase="TRADING_INTERNAL_EXC_BACKOFF", step=1.0)
+            elif self.state == STATE_IDLE:
+                logger.warning("[巡检] 空仓内部异常退避 | wait=%ss (不计入 API 错误计数)", min(self.idle_backoff, 60))
+                self._safe_sleep(min(self.idle_backoff, 60), phase="IDLE_INTERNAL_BACKOFF", step=1.0)
+                self.idle_backoff = min(self.idle_backoff * 2, 600)
+            else:
+                self._safe_sleep(10, phase="LOOP_INTERNAL_EXC_BACKOFF", step=1.0)
+            return
+
+        # 2. 外部 API / 交易所网络 / 模型通道异常分支 (Feature 3: 包含 exc_info=True)
         self.api_error_count += 1
-        logger.error("[异常] 核心循环错误 | 计数=%s/%s | err=%s",
-                     self.api_error_count, TRADING_ALERT_THRESHOLD, e)
+        logger.error(
+            "[异常] 核心循环外部/API错误 | 计数=%s/%s | state=%s | err=%s",
+            self.api_error_count,
+            TRADING_ALERT_THRESHOLD,
+            self.state,
+            e,
+            exc_info=True,
+        )
 
         if self.state == STATE_TRADING:
             if self.api_error_count >= TRADING_ALERT_THRESHOLD:
@@ -1427,9 +1620,17 @@ class TradingBot:
             self._safe_sleep(10, phase="TRADING_EXC_BACKOFF", step=1.0)
         elif self.state == STATE_IDLE:
             self.idle_api_error_count += 1
-            if self.idle_api_error_count >= IDLE_ALERT_THRESHOLD:
+            now_ts = time.time()
+            from alerts import categorize_error
+            tag = categorize_error(e)
+            last_alert = getattr(self, "last_idle_api_alert_time", 0.0)
+            # 告警节流保护 (Feature 9 & Feature 11): 阈值达标且每 30 分钟 (1800s) 最多告警一次
+            if self.idle_api_error_count >= IDLE_ALERT_THRESHOLD and (now_ts - last_alert >= 1800):
+                self.last_idle_api_alert_time = now_ts
                 send_alert(
-                    f"空仓期 API 连续异常 {self.idle_api_error_count} 次，请人工检查网络/AI 通道。")
+                    f"{tag} 空仓期 API 连续异常 {self.idle_api_error_count} 次，请人工检查网络。\n详细信息: {type(e).__name__}: {e}",
+                    subject=f"[交易机器人] {tag}"
+                )
             logger.warning("[巡检] 空仓异常退避 | wait=%ss", self.idle_backoff)
             self._safe_sleep(self.idle_backoff, phase="IDLE_BACKOFF")
             self.idle_backoff = min(self.idle_backoff * 2, 600)
@@ -1624,6 +1825,7 @@ class TradingBot:
     def _switch_coin(self, new_coin: str):
         """动态切换交易币种并重置关联客户端"""
         self.coin = new_coin
+        self.cached_atr_5m = 0.0  # 重置 ATR 缓存，杜绝跨币种污染 (Feature 25)
         if hasattr(self.exchange, "set_coin"):
             self.exchange.set_coin(new_coin)
         else:
@@ -1787,10 +1989,17 @@ class TradingBot:
             self.last_closed_pnl = float(data.get("last_closed_pnl") or 0.0)
             self.open_regime_cap = float(data.get("open_regime_cap") or 1.5)
             self.last_synced_sl = float(data.get("last_synced_sl") or 0.0) if data.get("last_synced_sl") is not None else None
-            self.cached_atr_5m = float(data.get("cached_atr_5m") or 0.0)
+            raw_atr = float(data.get("cached_atr_5m") or 0.0)
             self.radar_scores = data.get("radar_scores", {})
             self.coin_prices = data.get("coin_prices", {})
             pos_data = data.get("position")
+            saved_px = float(self.coin_prices.get(self.coin, 0.0) or (float(pos_data.get("entry_price", 0.0)) if isinstance(pos_data, dict) else 0.0))
+            if saved_px > 0 and raw_atr > 0 and (raw_atr / saved_px > 0.04 or raw_atr / saved_px < 0.0002):
+                logger.warning("[状态恢复] 剔除跨币种残留/失真 ATR (%.2f / %.2f = %.2f%%) | 强制重置",
+                               raw_atr, saved_px, (raw_atr / saved_px) * 100)
+                self.cached_atr_5m = 0.0
+            else:
+                self.cached_atr_5m = raw_atr
             if isinstance(pos_data, dict):
                 try:
                     opened_val = pos_data.get("opened_at")

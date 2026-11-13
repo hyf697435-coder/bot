@@ -135,7 +135,7 @@ def ema_series(values, period: int) -> np.ndarray:
                               min_periods=period).mean().to_numpy()
 
 
-def atr_series(highs, lows, closes, period: int = 14) -> np.ndarray:
+def atr_series(highs, lows=None, closes=None, period: int = 14) -> np.ndarray:
     """
     Average True Range (Wilder's RMA)
     
@@ -143,11 +143,28 @@ def atr_series(highs, lows, closes, period: int = 14) -> np.ndarray:
     TR[i] = max(High[i] - Low[i], |High[i] - Close[i-1]|, |Low[i] - Close[i-1]|)
     ATR[i] = RMA(TR, period)
     
-    【优化】完全向量化，消除循环
+    【调用格式】
+    - atr_series(df, period=14): 从 DataFrame 自动解析 high/low/close 列
+    - atr_series(highs, lows, closes, period=14): 独立序列调用
     """
-    h = _as_float_array(highs)
-    l = _as_float_array(lows)
-    c = _as_float_array(closes)
+    if isinstance(highs, pd.DataFrame):
+        df = highs
+        col_map = {str(c).lower(): c for c in df.columns}
+        if not all(k in col_map for k in ("high", "low", "close")):
+            return np.full(len(df), np.nan, dtype=np.float64)
+        h = df[col_map["high"]]
+        l = df[col_map["low"]]
+        c = df[col_map["close"]]
+        if lows is not None and isinstance(lows, (int, np.integer)):
+            period = int(lows)
+    else:
+        h = highs
+        l = lows
+        c = closes
+
+    h = _as_float_array(h)
+    l = _as_float_array(l)
+    c = _as_float_array(c)
     
     if not _validate_inputs(h, l, c, min_length=period + 1):
         return np.full(len(c), np.nan, dtype=np.float64)
@@ -171,13 +188,21 @@ def atr_series(highs, lows, closes, period: int = 14) -> np.ndarray:
     return atr_values
 
 
-def atr(highs, lows, closes, period: int = 14) -> float:
-    """返回最新 ATR 标量值"""
+def atr(highs, lows=None, closes=None, period: int = 14) -> float:
+    """返回最新 ATR 标量值 (兼容 DataFrame 与独立 Series)"""
+    if isinstance(highs, pd.DataFrame) and lows is not None and isinstance(lows, (int, np.integer)):
+        period = int(lows)
+        lows = None
     series = atr_series(highs, lows, closes, period)
     if len(series) == 0:
         return 0.0
     last = series[-1]
     return 0.0 if np.isnan(last) else float(last)
+
+
+# 对齐 PROJECT.md 与策略规范别名 (Feature 25)
+rma_atr = atr
+wilder_rma_atr = atr
 
 
 # ═══════════════════════════════════════════════════════════════════

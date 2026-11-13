@@ -45,9 +45,9 @@ def _safe_finite_float(val, default: Optional[float] = None) -> Optional[float]:
 class RiskConfig:
     """风控配置参数"""
     # Kelly Criterion
-    kelly_fraction: float = 0.5            # 半凯利 (0.5 = Half Kelly)
+    kelly_fraction: float = 0.20           # 五分之一凯利 (去过拟合实盘稳健值)
     max_single_risk_pct: float = 4.0        # 单笔最大本金风险 (%)
-    single_risk_pct: float = 2.5            # 标准单笔风险 (%)
+    single_risk_pct: float = 2.0            # 标准单笔风险 (%) (冷启动期平滑对齐)
     min_single_risk_pct: float = 0.5        # 探针/最小单笔风险 (%)
     max_leverage: float = 5.0              # 严格对齐底层的最高杠杆 Clamp[1, 5]
     min_kelly_trades: int = 30             # 凯利公式启动的最小样本量 (N >= 30 避免方差爆炸)
@@ -64,17 +64,18 @@ class RiskConfig:
     daily_loss_limit_pct: float = 15.0     # 单日亏损熔断阈值 (%)
     
     # 动态止损/止盈
-    breakeven_profit_r: float = 1.0        # 浮盈达到 1.0R 时移至保本
-    trailing_start_r: float = 1.5          # 浮盈达到 1.5R 时启动追踪止损
-    trailing_atr_multiplier: float = 1.5    # 追踪止损距离 (1.5 * ATR)
+    breakeven_profit_r: float = 1.05       # 浮盈达到 1.05R 时移至保本
+    breakeven_margin: float = 0.0025       # 保本滑点边际 0.25% (覆盖双边 0.20% 摩擦并锁定 +0.05% 真实净利)
+    trailing_start_r: float = 1.45         # 浮盈达到 1.45R 时启动追踪止损
+    trailing_atr_multiplier: float = 1.5   # 追踪止损距离基准 (由 TradingBot 加载配置动态调优为 2.35)
     
     # 连续亏损保护
-    max_consecutive_losses: int = 3        # 连续亏损熔断笔数
+    max_consecutive_losses: int = 3        # 连续亏损熔断笔数基准 (由 TradingBot 加载配置动态调优为 4)
     cooldown_hours_after_streak: float = 12.0  # 冷却时间 (小时)
     
     # 时间衰减平仓
-    max_holding_bars: int = 24             # 最大持仓 K线数 (5m*24 = 2小时)
-    time_decay_profit_threshold_r: float = 0.5  # 时间衰减触发平仓的浮盈阈值 (R)
+    max_holding_bars: int = 24             # 最大持仓 K线数基准 (由 TradingBot 加载配置动态调优为 45 根)
+    time_decay_profit_threshold_r: float = 0.5  # 时间衰减触发平仓的浮盈阈值基准 (由 TradingBot 加载配置动态调优为 0.80R)
 
 
 @dataclass
@@ -160,8 +161,10 @@ class RiskManager:
         
         # 单日亏损追踪
         self.daily_pnl = 0.0
+        self.daily_loss_pnl = 0.0
         self.daily_start_equity = self.initial_equity
         self.current_date = datetime.now(timezone.utc).date()
+        self.daily_loss_date = self.current_date.strftime("%Y-%m-%d")
         self.cooldown_until: Optional[str] = None
         self._last_equity_record_ts = 0.0
         
@@ -173,6 +176,7 @@ class RiskManager:
         if f_eq is None or f_eq <= 0:
             return
         with self._lock:
+            self.check_daily_reset(current_equity=f_eq)
             changed = abs(self.current_equity - f_eq) > 0.01
             self.current_equity = f_eq
             if f_eq > self.metrics.peak_equity:
@@ -180,7 +184,7 @@ class RiskManager:
             self._update_drawdown()
             if changed:
                 self._save_state()
-            self._append_equity_history()
+            self.sample_equity_history(current_equity=f_eq)
     
     def calculate_kelly_position_size(self, win_rate: float, 
                                      avg_win_loss_ratio: float,
@@ -323,13 +327,48 @@ class RiskManager:
                 self.cooldown_until = None
                 self._save_state()
 
+    def check_daily_reset(self, current_equity: Optional[float] = None, current_date_utc: Optional[object] = None) -> bool:
+        """
+        自然日切日重置检查与同步 (Feature 21)：
+        当 UTC 日期递增 (current_date_utc > self.current_date) 时，
+        重置 daily_pnl = 0.0, daily_loss_pnl = 0.0, daily_loss_date = current_date_utc,
+        daily_start_equity = current_equity，并立即持久化落盘。
+        """
+        with self._lock:
+            if current_equity is not None:
+                f_eq = _safe_finite_float(current_equity)
+                if f_eq is not None and f_eq > 0:
+                    self.current_equity = f_eq
+
+            if current_date_utc is None:
+                target_date = datetime.now(timezone.utc).date()
+            elif isinstance(current_date_utc, str):
+                try:
+                    target_date = datetime.strptime(current_date_utc.strip(), "%Y-%m-%d").date()
+                except Exception:
+                    target_date = datetime.now(timezone.utc).date()
+            elif hasattr(current_date_utc, "strftime") and hasattr(current_date_utc, "year"):
+                target_date = current_date_utc.date() if hasattr(current_date_utc, "date") else current_date_utc
+            else:
+                target_date = datetime.now(timezone.utc).date()
+
+            if target_date != self.current_date:
+                logger.info(
+                    f"[RiskManager] 触发自然日切日重置 | 原日期={self.current_date} -> 新日期={target_date} | "
+                    f"重置 daily_pnl: {self.daily_pnl:+.2f} -> 0.00 | 基准权益={self.current_equity:.2f}"
+                )
+                self.current_date = target_date
+                self.daily_loss_date = target_date.strftime("%Y-%m-%d")
+                self.daily_pnl = 0.0
+                self.daily_loss_pnl = 0.0
+                self.daily_start_equity = max(self.current_equity, 1e-4)
+                self._save_state()
+                return True
+            return False
+
     def _check_and_roll_date(self):
-        """自动检测跨日并重置单日统计指标，根治日亏熔断跨日死锁"""
-        today = datetime.now(timezone.utc).date()
-        if today != self.current_date:
-            self.daily_pnl = 0.0
-            self.current_date = today
-            self.daily_start_equity = max(self.current_equity, 1e-4)
+        """兼容原有私有调用，委派至 check_daily_reset 并确保持久化落盘"""
+        return self.check_daily_reset()
 
     def _clean_expired_reservations(self):
         """清除超时的槽位预占（默认 30s 超时）"""
@@ -478,13 +517,14 @@ class RiskManager:
         new_tp = None
         close_signal = None
         
-        # 1. 浮盈达到 1.0R 时移至保本价（+0.15% 覆盖双边 Taker 手续费与滑点）
+        # 1. 浮盈达到 breakeven_profit_r 时移至保本价 (覆盖双边摩擦并锁定净利)
         if profit_r >= self.config.breakeven_profit_r:
+            be_margin = getattr(self.config, "breakeven_margin", 0.0025)
             if is_long:
-                be_sl = entry_price * 1.0015
+                be_sl = entry_price * (1.0 + be_margin)
                 new_sl = max(new_sl, be_sl)
             else:
-                be_sl = entry_price * 0.9985
+                be_sl = entry_price * (1.0 - be_margin)
                 new_sl = min(new_sl, be_sl)
         
         # 2. 浮盈达到 1.5R 启动追踪止损（基于 peak_price 回撤 1.5 * ATR，校验 atr 有效性防 NaN 污染）
@@ -534,7 +574,7 @@ class RiskManager:
             self._update_streak(pnl_val)
             self._update_risk_adjusted_metrics()
             self._save_state()
-            self._append_equity_history()
+            self.sample_equity_history(current_equity=self.current_equity)
             
             logger.info(
                 f"[RiskManager] 记录交易 | 币种={trade.coin} | 盈亏=${trade.pnl:+.2f} ({trade.pnl_pct*100:+.2f}%) | "
@@ -640,16 +680,277 @@ class RiskManager:
         self.metrics.sharpe_ratio = 0.0
         self.metrics.sortino_ratio = 0.0
 
+    def recalculate_metrics(self):
+        """
+        全量重新对账与计算历史指标 (Feature 22)：
+        基于 self.trade_history 完整时间线重建统计数据，彻底消除指标假死与脏状态。
+        """
+        with self._lock:
+            trades = list(self.trade_history)
+            self.metrics.total_trades = len(trades)
+            if not trades:
+                self.metrics.winning_trades = 0
+                self.metrics.losing_trades = 0
+                self.metrics.total_pnl = 0.0
+                self.metrics.total_pnl_pct = 0.0
+                self.metrics.win_rate = 0.0
+                self.metrics.avg_win = 0.0
+                self.metrics.avg_loss = 0.0
+                self.metrics.profit_factor = 0.0
+                self.metrics.current_streak = 0
+                self.metrics.max_consecutive_wins = 0
+                self.metrics.max_consecutive_losses = 0
+                self.metrics.current_drawdown_pct = 0.0
+                self.metrics.max_drawdown_pct = 0.0
+                self.metrics.peak_equity = max(self.initial_equity, self.current_equity)
+                self.metrics.last_updated = datetime.now(timezone.utc).isoformat()
+                return
+
+            wins = [t.pnl for t in trades if t.pnl > 0 and math.isfinite(t.pnl)]
+            losses = [abs(t.pnl) for t in trades if t.pnl < 0 and math.isfinite(t.pnl)]
+            self.metrics.winning_trades = len(wins)
+            self.metrics.losing_trades = len(losses)
+            self.metrics.win_rate = float(len(wins) / len(trades)) if trades else 0.0
+            self.metrics.avg_win = float(np.mean(wins)) if wins else 0.0
+            self.metrics.avg_loss = float(np.mean(losses)) if losses else 0.0
+            total_win = sum(wins)
+            total_loss = sum(losses)
+            self.metrics.profit_factor = float(total_win / total_loss) if total_loss > 0 else (float("inf") if total_win > 0 else 0.0)
+
+            total_pnl = sum(t.pnl for t in trades if math.isfinite(t.pnl))
+            self.metrics.total_pnl = total_pnl
+            self.metrics.total_pnl_pct = (total_pnl / max(self.initial_equity, 1e-6)) * 100.0
+
+            # 重构连续胜负序列
+            streak = 0
+            max_wins = 0
+            max_losses = 0
+            for t in trades:
+                p = t.pnl
+                if p > 0:
+                    streak = streak + 1 if streak > 0 else 1
+                    max_wins = max(max_wins, streak)
+                elif p < 0:
+                    streak = streak - 1 if streak < 0 else -1
+                    max_losses = max(max_losses, abs(streak))
+            self.metrics.current_streak = streak
+            self.metrics.max_consecutive_wins = max_wins
+            self.metrics.max_consecutive_losses = max_losses
+
+            # 检查冷却状态
+            if streak <= -self.config.max_consecutive_losses:
+                if not self.cooldown_until:
+                    cd_time = datetime.now(timezone.utc) + timedelta(hours=self.config.cooldown_hours_after_streak)
+                    self.cooldown_until = cd_time.isoformat()
+            else:
+                self.cooldown_until = None
+
+            # 重新计算回撤
+            running_eq = self.initial_equity
+            peak = self.initial_equity
+            max_dd = 0.0
+            for t in trades:
+                running_eq += t.pnl
+                if running_eq > peak:
+                    peak = running_eq
+                dd = ((peak - running_eq) / peak) * 100.0 if peak > 0 else 0.0
+                if dd > max_dd:
+                    max_dd = dd
+
+            if self.current_equity > peak:
+                peak = self.current_equity
+            cur_dd = ((peak - self.current_equity) / peak) * 100.0 if peak > 0 else 0.0
+            self.metrics.peak_equity = peak
+            self.metrics.current_drawdown_pct = round(max(cur_dd, 0.0), 2)
+            self.metrics.max_drawdown_pct = round(max(max_dd, cur_dd), 2)
+
+            self._update_risk_adjusted_metrics()
+            self.metrics.last_updated = datetime.now(timezone.utc).isoformat()
+
+    def reconcile_from_fills(self, fills: List[dict]) -> int:
+        """
+        从 Hyperliquid 成交流水 (fills) 自动重建真实历史成交与风控指标 (Feature 22)。
+        """
+        if not fills or not isinstance(fills, list):
+            return 0
+            
+        with self._lock:
+            sorted_fills = sorted(fills, key=lambda x: x.get("time", 0))
+            orders: Dict[int, List[dict]] = {}
+            for f in sorted_fills:
+                oid = f.get("oid")
+                if oid is not None:
+                    orders.setdefault(oid, []).append(f)
+                    
+            reconstructed_trades: List[TradeRecord] = []
+            running_equity = self.initial_equity
+            
+            for oid, fs in orders.items():
+                is_close = any("Close" in str(f.get("dir", "")) for f in fs) or abs(sum(float(f.get("closedPnl", 0.0) or 0.0) for f in fs)) > 0.001
+                if not is_close:
+                    continue
+                    
+                coin = str(fs[0].get("coin", "UNKNOWN"))
+                raw_dir = str(fs[0].get("dir", ""))
+                direction = "SHORT" if "Short" in raw_dir else "LONG"
+                
+                exit_ts = fs[-1].get("time", 0) / 1000.0
+                exit_time = datetime.fromtimestamp(exit_ts, timezone.utc).isoformat()
+                
+                total_sz = sum(float(f.get("sz", 0.0) or 0.0) for f in fs)
+                if total_sz <= 0:
+                    continue
+                    
+                avg_exit_px = sum(float(f.get("px", 0.0) or 0.0) * float(f.get("sz", 0.0) or 0.0) for f in fs) / total_sz
+                gross_pnl = sum(float(f.get("closedPnl", 0.0) or 0.0) for f in fs)
+                fees = sum(float(f.get("fee", 0.0) or 0.0) for f in fs)
+                net_pnl = gross_pnl - fees
+                
+                entry_time = exit_time
+                entry_px = avg_exit_px
+                dur_mins = 0
+                for prev_oid, prev_fs in orders.items():
+                    if prev_fs[-1].get("time", 0) < fs[0].get("time", 0) and prev_fs[0].get("coin") == coin:
+                        if any("Open" in str(pf.get("dir", "")) for pf in prev_fs):
+                            prev_sz = sum(float(pf.get("sz", 0.0) or 0.0) for pf in prev_fs)
+                            if prev_sz > 0:
+                                entry_px = sum(float(pf.get("px", 0.0) or 0.0) * float(pf.get("sz", 0.0) or 0.0) for pf in prev_fs) / prev_sz
+                                prev_ts = prev_fs[0].get("time", 0) / 1000.0
+                                entry_time = datetime.fromtimestamp(prev_ts, timezone.utc).isoformat()
+                                dur_mins = max(0, int((exit_ts - prev_ts) / 60.0))
+                                
+                size_notional = round(total_sz * avg_exit_px, 2)
+                pnl_pct = net_pnl / max(running_equity, 1e-4)
+                initial_risk_dist = abs(entry_px - avg_exit_px)
+                pnl_r = round(net_pnl / max(initial_risk_dist * total_sz, 1e-4), 2) if initial_risk_dist > 0 else 0.0
+                
+                rec = TradeRecord(
+                    entry_time=entry_time,
+                    exit_time=exit_time,
+                    coin=coin,
+                    direction=direction,
+                    entry_price=round(entry_px, 4),
+                    exit_price=round(avg_exit_px, 4),
+                    size=size_notional,
+                    pnl=round(net_pnl, 2),
+                    pnl_pct=round(pnl_pct, 4),
+                    pnl_r=pnl_r,
+                    hold_duration_minutes=dur_mins,
+                    exit_reason="EXCHANGE_FILL",
+                    entry_equity=round(running_equity, 2)
+                )
+                reconstructed_trades.append(rec)
+                running_equity += net_pnl
+
+            if reconstructed_trades:
+                logger.info(f"[RiskManager] 从交易所成交流成功重构 {len(reconstructed_trades)} 笔已结算交易")
+                self.trade_history = reconstructed_trades
+                self.recalculate_metrics()
+                self._save_state()
+                return len(reconstructed_trades)
+            return 0
+
+    def sample_equity_history(self, current_equity: Optional[float] = None,
+                              timestamp: Optional[object] = None) -> bool:
+        """
+        定期采样权益曲线历史 (Feature 24 契约实现)。
+        
+        - 保证单调时间戳递增与去重 (同一时间戳更新而不是重复追加)。
+        - 字段全面对齐看板需求 (ts, equity, drawdown_pct, time, date, hour, minute)。
+        - 双盘同步写入 self.equity_history_file 与 equity_history.json。
+        - 硬限 5000 条，原子性 .tmp 替换写入。
+        """
+        with self._lock:
+            now_sec = time.time()
+            if timestamp is not None:
+                try:
+                    ts_raw = float(timestamp)
+                    if not math.isfinite(ts_raw) or ts_raw <= 0:
+                        ts_raw = now_sec
+                except (ValueError, TypeError):
+                    ts_raw = now_sec
+                ts_ms = int(ts_raw * 1000) if ts_raw < 1e11 else int(ts_raw)
+            else:
+                ts_ms = int(now_sec * 1000)
+
+            if current_equity is not None:
+                f_eq = _safe_finite_float(current_equity)
+                if f_eq is not None and f_eq > 0:
+                    self.current_equity = f_eq
+                    if f_eq > self.metrics.peak_equity:
+                        self.metrics.peak_equity = f_eq
+                    self._update_drawdown()
+
+            dt = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
+            point = {
+                "ts": ts_ms,
+                "equity": round(self.current_equity, 2),
+                "drawdown_pct": round(self.metrics.current_drawdown_pct, 2),
+                "time": dt.strftime("%m-%d %H:%M"),
+                "date": dt.strftime("%m-%d"),
+                "hour": dt.strftime("%m-%d %H:00"),
+                "minute": dt.strftime("%H:%M")
+            }
+
+            target_files = [self.equity_history_file]
+            if self.equity_history_file != "equity_history.json":
+                target_files.append("equity_history.json")
+
+            for hf in set(target_files):
+                history = []
+                try:
+                    if os.path.exists(hf):
+                        with open(hf, "r", encoding="utf-8") as f:
+                            loaded = json.load(f)
+                            if isinstance(loaded, list):
+                                history = loaded
+                except Exception:
+                    history = []
+
+                # 去重与单调性保证
+                if history and isinstance(history[-1], dict):
+                    last_p = history[-1]
+                    last_ts = int(last_p.get("ts", 0))
+                    if last_ts == ts_ms:
+                        history[-1].update(point)
+                    elif ts_ms < last_ts:
+                        # 时间戳早于尾部，避免倒流破坏单调性
+                        continue
+                    else:
+                        history.append(point)
+                else:
+                    history.append(point)
+
+                if len(history) > 5000:
+                    history = history[-5000:]
+
+                try:
+                    tmp_f = f"{hf}.tmp"
+                    with open(tmp_f, "w", encoding="utf-8") as f:
+                        json.dump(history, f, indent=2, ensure_ascii=False)
+                    os.replace(tmp_f, hf)
+                except Exception as e:
+                    logger.warning(f"[RiskManager] 写入权益历史异常 | file={hf} | err={e}")
+
+            return True
+
+    def _append_equity_history(self):
+        """兼容原有私有调用，委派至 sample_equity_history"""
+        return self.sample_equity_history()
+
     def _save_state(self):
         try:
+            cur_date_str = self.current_date.strftime("%Y-%m-%d") if hasattr(self.current_date, "strftime") else str(self.current_date)
             state = {
                 "initial_equity": self.initial_equity,
                 "current_equity": self.current_equity,
                 "peak_equity": self.metrics.peak_equity,
                 "daily_pnl": self.daily_pnl,
+                "daily_loss_pnl": self.daily_pnl,
                 "daily_start_equity": getattr(self, "daily_start_equity", self.initial_equity),
                 "cooldown_until": getattr(self, "cooldown_until", None),
-                "current_date": str(self.current_date),
+                "current_date": cur_date_str,
+                "daily_loss_date": cur_date_str,
                 "metrics": self.metrics.to_dict(),
                 "recent_trades": [asdict(t) for t in self.trade_history[-500:]],
             }
@@ -672,14 +973,17 @@ class RiskManager:
             self.initial_equity = float(state.get("initial_equity") or self.initial_equity)
             self.current_equity = float(state.get("current_equity") or self.current_equity)
             self.daily_pnl = float(state.get("daily_pnl") or 0.0)
+            self.daily_loss_pnl = float(state.get("daily_loss_pnl") or self.daily_pnl)
             self.daily_start_equity = float(state.get("daily_start_equity") or self.current_equity)
             self.cooldown_until = state.get("cooldown_until") or None
-            date_str = state.get("current_date")
+            date_str = state.get("current_date") or state.get("daily_loss_date")
             if date_str:
                 try:
                     self.current_date = datetime.strptime(str(date_str).strip(), "%Y-%m-%d").date()
                 except Exception:
                     self.current_date = datetime.now(timezone.utc).date()
+            self.daily_loss_date = self.current_date.strftime("%Y-%m-%d")
+
             m = state.get("metrics")
             if isinstance(m, dict):
                 for k, v in m.items():
@@ -699,46 +1003,15 @@ class RiskManager:
                             self.trade_history.append(TradeRecord(**t))
                         except Exception:
                             pass
+
+            # 关键：检查是否跨日，若跨日自动重置并持久化 (Feature 21)
+            today_utc = datetime.now(timezone.utc).date()
+            if self.current_date < today_utc:
+                self.check_daily_reset(current_date_utc=today_utc)
+
+            # 关键：若 metrics 为空或与历史交易显著失真，自动重构指标 (Feature 22)
+            if self.trade_history and (self.metrics.total_trades != len(self.trade_history) or (self.metrics.win_rate == 0.0 and any(t.pnl > 0 for t in self.trade_history))):
+                self.recalculate_metrics()
+                self._save_state()
         except Exception as e:
             logger.warning(f"[RiskManager] 加载状态失败: {e}")
-
-    def _append_equity_history(self):
-        """记录权益快照到 equity_history.json (防抖: 15s内且无显著变动则跳过)"""
-        now = time.time()
-        if hasattr(self, '_last_equity_record_ts') and now - self._last_equity_record_ts < 15.0:
-            return
-        self._last_equity_record_ts = now
-        hist_file = self.equity_history_file
-        history = []
-        try:
-            if os.path.exists(hist_file):
-                with open(hist_file, "r", encoding="utf-8") as f:
-                    history = json.load(f)
-                    if not isinstance(history, list):
-                        history = []
-        except Exception:
-            history = []
-        
-        point = {
-            "ts": int(now * 1000),
-            "equity": round(self.current_equity, 2),
-            "drawdown_pct": round(self.metrics.current_drawdown_pct, 2)
-        }
-        if history and isinstance(history[-1], dict):
-            last_p = history[-1]
-            last_eq = last_p.get("equity")
-            last_ts = _safe_finite_float(last_p.get("ts"), 0.0) or 0.0
-            if last_eq == point["equity"] and (now - last_ts / 1000.0) < 180.0:
-                return
-
-        history.append(point)
-        if len(history) > 5000:
-            history = history[-5000:]
-            
-        try:
-            tmp_hist = f"{hist_file}.tmp"
-            with open(tmp_hist, "w", encoding="utf-8") as f:
-                json.dump(history, f, indent=2)
-            os.replace(tmp_hist, hist_file)
-        except Exception as e:
-            logger.warning(f"[RiskManager] 写入权益历史异常: {e}")

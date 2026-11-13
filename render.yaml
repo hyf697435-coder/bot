@@ -1,0 +1,50 @@
+# ==============================================================================
+# render.yaml: Render Infrastructure Blueprint for 24/7 Trading Bot & Dashboard
+# ==============================================================================
+# Deploy: Link GitHub repository to Render and create via "Blueprints" menu.
+# Free Tier Specs: 750 free hours/month (Runs 24/7 continuously with UptimeRobot ping)
+# ==============================================================================
+services:
+  - type: web
+    name: hyperliquid-trading-bot
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: Dockerfile
+    healthCheckPath: /api/state
+    autoDeploy: false
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: MAINTENANCE_LOCK
+        value: "false"
+      - key: HYPE_USER_ADDRESS
+        sync: false
+      - key: HYPE_SECRET_KEY
+        sync: false
+      - key: HYPE_API_WALLET_ADDRESS
+        sync: false
+      - key: THIRD_PARTY_BASE_URL
+        sync: false
+      - key: THIRD_PARTY_API_KEY
+        sync: false
+      - key: MODEL_MACRO
+        value: deepseek-chat
+      - key: MODEL_AI_TRADE
+        value: deepseek-reasoner
+      - key: MAIL_ENABLED
+        value: "false"
+      - key: SMTP_SERVER
+        sync: false
+      - key: SMTP_PORT
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: MAIL_TO
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false

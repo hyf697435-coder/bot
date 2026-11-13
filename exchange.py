@@ -29,6 +29,7 @@ __release_date__ = "2026-11-01"
 import http.server
 import math
 import os
+import random
 import socket
 import socketserver
 import subprocess
@@ -237,6 +238,34 @@ class MarketData:
             self._ohlcv_cache.clear()
             self._fr_cache = None
 
+    def _post_info_with_retry(self, payload: dict, timeout: float = 15.0, max_retries: int = 3, err_context: str = ""):
+        """
+        向 /info 发送 POST 请求，带 3 次指数退避与随机抖动重试 (Feature 5)。
+        重试间隔基准: 1.0s, 2.0s, 4.0s + 0.1~0.5s jitter
+        三次均失败时抛出 MarketDataError。
+        """
+        client = self.get_http_client()
+        last_err = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                resp = client.post(self.base_url + "/info", json=payload, timeout=timeout)
+                resp.raise_for_status()
+                return resp.json()
+            except Exception as e:
+                last_err = e
+                if attempt < max_retries:
+                    jitter = random.uniform(0.1, 0.5)
+                    backoff = (1.0 * (2 ** (attempt - 1))) + jitter
+                    logger.warning(
+                        "[MarketData] /info 请求失败 (尝试 %s/%s) | context=%s | err=%s | action=等待 %.2fs 后重试",
+                        attempt, max_retries, err_context or payload.get("type"), e, backoff
+                    )
+                    time.sleep(backoff)
+                else:
+                    break
+        ctx_desc = f" ({err_context})" if err_context else f" ({self.coin}/{payload.get('type')})"
+        raise MarketDataError(f"行情请求失败{ctx_desc}: {last_err}")
+
     # ------------------------------------------------------------------
     # K 线
     # ------------------------------------------------------------------
@@ -261,13 +290,7 @@ class MarketData:
             "type": "candleSnapshot",
             "req": {"coin": self.coin, "interval": timeframe, "startTime": now_ms - span_ms},
         }
-        client = self.get_http_client()
-        try:
-            resp = client.post(self.base_url + "/info", json=payload, timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as e:
-            raise MarketDataError(f"行情请求失败 ({self.coin}/{timeframe}): {e}")
+        data = self._post_info_with_retry(payload, timeout=15, max_retries=3, err_context=f"{self.coin}/{timeframe}")
 
         if not isinstance(data, list) or not data:
             raise MarketDataError(f"行情数据为空 ({self.coin}/{timeframe})")
@@ -331,13 +354,7 @@ class MarketData:
 
     def mark_price(self) -> float:
         """allMids 标记价 (持仓期 1s 轮询用，单请求权重最低)。"""
-        client = self.get_http_client()
-        try:
-            resp = client.post(self.base_url + "/info", json={"type": "allMids"}, timeout=10)
-            resp.raise_for_status()
-            mids = resp.json()
-        except Exception as e:
-            raise MarketDataError(f"allMids 请求失败: {e}")
+        mids = self._post_info_with_retry({"type": "allMids"}, timeout=10, max_retries=3, err_context="allMids")
         try:
             return float(mids[self.coin])
         except (KeyError, TypeError, ValueError) as e:
@@ -369,13 +386,7 @@ class MarketData:
         start_ms = now_ms - window_hours * 3600 * 1000
         # fundingHistory 字段平铺顶层 (官方 SDK 口径)，与 candleSnapshot 的 req 包装不同
         payload = {"type": "fundingHistory", "coin": self.coin, "startTime": start_ms}
-        client = self.get_http_client()
-        try:
-            resp = client.post(self.base_url + "/info", json=payload, timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as e:
-            raise MarketDataError(f"fundingHistory 请求失败: {e}")
+        data = self._post_info_with_retry(payload, timeout=15, max_retries=3, err_context=f"fundingHistory/{self.coin}")
 
         if not isinstance(data, list) or not data:
             raise MarketDataError(f"fundingHistory 数据为空 ({self.coin})")

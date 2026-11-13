@@ -242,6 +242,16 @@ class MultiCoinRouter:
             except Exception:
                 df_5m = market.get_ohlcv("5m", 120)
                 price = float(df_5m["close"].iloc[-1]) if (df_5m is not None and not df_5m.empty) else 0.0
+
+            # 若 5m 无法取得有效价格，快速从 1m/实时行情获取兜底现价 (Feature 23)
+            if price <= 0.0:
+                try:
+                    df_1m = market.get_ohlcv("1m", 5)
+                    if df_1m is not None and not df_1m.empty:
+                        price = float(df_1m["close"].iloc[-1])
+                except Exception:
+                    pass
+
             df_1h = market.get_ohlcv("1h", 500)
             df_4h = market.get_ohlcv("4h", 500)
             fr_stats = market.get_funding_stats(168)
@@ -272,12 +282,17 @@ class MultiCoinRouter:
             score = float(signal_result.get("score", 0.0)) if signal_result else 0.0
             direction = signal_result.get("direction") if signal_result else None
 
-            # 无论是否达标，均记录最新全量雷达打分供看板与状态机持久化
+            import utils
+            calc_atr = utils.atr(df_5m["high"], df_5m["low"], df_5m["close"], 14) if (df_5m is not None and not df_5m.empty and "high" in df_5m.columns) else 0.0
+            atr_14 = float(calc_atr) if (calc_atr is not None and math.isfinite(calc_atr) and calc_atr > 0) else 0.0
+
+            # 无论是否达标，均记录最新全量雷达打分供看板与状态机持久化 (Feature 23 & Feature 25)
             self.latest_radar_scores[coin] = {
                 "score": round(score, 1),
-                "direction": direction or "NEUTRAL",
+                "direction": direction if (score > 0 and direction) else "NEUTRAL",
                 "price": price,
-                "trs": round(trs, 4)
+                "trs": round(trs, 4),
+                "atr": round(atr_14, 4),
             }
             self.latest_coin_prices[coin] = price
 
@@ -326,9 +341,13 @@ class MultiCoinRouter:
             )
         except MarketDataError as e:
             logger.warning(f"[MultiCoin] {coin} 行情获取失败: {e}")
+            if coin not in self.latest_radar_scores:
+                self.latest_radar_scores[coin] = {"score": 0.0, "direction": "NEUTRAL", "price": 0.0, "trs": 0.0, "atr": 0.0}
             return None
         except Exception as e:
             logger.error(f"[MultiCoin] {coin} 信号评估异常: {e}", exc_info=True)
+            if coin not in self.latest_radar_scores:
+                self.latest_radar_scores[coin] = {"score": 0.0, "direction": "NEUTRAL", "price": 0.0, "trs": 0.0, "atr": 0.0}
             return None
 
     def apply_correlation_penalty(self, signal: CoinSignal, base_coin: str) -> float:

@@ -283,7 +283,7 @@ def build_system_prompt(agent: str) -> str:
 # 2. AI_Trade 执行关口
 # ==========================================
 
-SIGNAL_GATE = 70.0     # SS >= 70 才唤醒 AI_Trade
+SIGNAL_GATE = 68.5     # SS >= 68.5 才唤醒 AI_Trade (经 11 组优化器对齐与实盘门禁调优)
 SL_MAX_MULT = 1.2      # AI 止损最宽 = 1.2 x 本地止损距离
 RR_FINAL_MIN = 1.5     # 二次校验盈亏比底线
 CANDLES_IN_PAYLOAD = 48  # 传递给 AI_Trade 的近端 5m K 线根数
@@ -643,8 +643,8 @@ def fetch_ai_macro_state(macro_context: dict, client: Optional[AIClient] = None,
     try:
         result = client.chat_json(build_system_prompt("AI_macro"), user, agent="AI_macro")
     except AIError as e:
-        logger.warning("[宏观] AI_macro 调用失败 | action=沿用本地量化态 | err=%s", e)
-        send_alert(f"AI_macro 调用失败，已沿用本地量化趋势态: {e}")
+        logger.warning("[宏观] AI_macro 中转站调用超时/失败 | action=安全沿用本地量化态 | err=%s", e)
+        # 空仓期/平仓态下 AI 中转站超时属于正常预期事件，安全降级至量化态，不触发警报邮件
         return (None, {}) if return_details else None
 
     raw = (result or {}).get("suggested_state")
@@ -701,11 +701,11 @@ def apply_trend_guardrail(quant_state: MacroState, ai_suggested_state: MacroStat
 # ==========================================
 
 BASE_SCORE = 50.0
-RR_TARGET = 2.0          # raw_tp 依据 R:R = 2.0 反推
+RR_TARGET = 2.90         # raw_tp 依据 R:R = 2.90 反推 (CMA-ES 拓扑稳健对齐)
 RR_MIN = 1.5             # 硬性拦截底线
 RR_BONUS = 2.0           # 高盈亏比加分门槛 (R:R >= 2.0)
 SL_SWING_BARS = 12       # raw_sl 的 5m 摆动低点/高点回看根数
-SL_ATR_MULT = 1.5        # raw_sl 的 ATR 倍率
+SL_ATR_MULT = 2.95       # raw_sl 的 ATR 倍率 (防 5m 局部噪点与插针)
 VOL_SPIKE_MULT = 1.5     # Volume Spike 放大倍数
 NEAR_LEVEL_PCT = 0.005   # 阻力/支撑"近在咫尺"阈值 (0.5%)
 FR_HOT_8H = 0.0003       # FR 过热阈值 (8h 等效费率 0.03%)
@@ -835,14 +835,56 @@ class SlTpResult(tuple):
         return self[2]
 
 
+def calc_atr(
+    df_or_highs,
+    lows=None,
+    closes=None,
+    period: int = 14,
+    price: Optional[float] = None,
+    coin: Optional[str] = None
+) -> float:
+    """
+    计算并校准 5m ATR，保证符合标的真实波动率比例 (中位 ~0.1% - 0.4%，ETH 约 1.5 - 8.0 USDC)。
+    杜绝跨币种污染 (如 BTC ATR 213.72 误用至 ETH) 或异常极值 (Feature 25)。
+    """
+    cur_px = price
+    if cur_px is None or cur_px <= 0:
+        if isinstance(df_or_highs, pd.DataFrame):
+            col_map = {str(c).lower(): c for c in df_or_highs.columns}
+            if "close" in col_map:
+                try:
+                    cur_px = float(df_or_highs[col_map["close"]].iloc[-1])
+                except Exception:
+                    pass
+        elif closes is not None and len(closes) > 0:
+            try:
+                cur_px = float(closes.iloc[-1] if hasattr(closes, "iloc") else closes[-1])
+            except Exception:
+                pass
+
+    raw_atr = utils.atr(df_or_highs, lows, closes, period)
+    valid_atr = float(raw_atr) if (raw_atr is not None and math.isfinite(raw_atr) and raw_atr > 0) else 0.0
+
+    # 5m K 线波动率 (ATR / Price) 通常分布在 0.05% ~ 1.5% (中位 ~0.20%)。
+    # 若 ATR <= 0 或 ATR / Price > 4.0% (如 ETH 出现 213.72 导致占比超 10%)，判定为数据缺失或跨币种污染，
+    # 必须校准回基准比例 (price * 0.0020)，确保风控计算不被放大 100 倍。
+    if cur_px and cur_px > 0:
+        if valid_atr <= 0 or (valid_atr / cur_px) > 0.04 or (valid_atr / cur_px) < 0.0002:
+            calibrated = cur_px * 0.0020
+            logger.warning("[ATR校准] %s 5m ATR 异常 (%.4f, 现价=%.2f, 占比=%.2f%%) | 校准为比例值 %.4f",
+                           coin or "UNKNOWN", valid_atr, cur_px, (valid_atr / cur_px) * 100 if valid_atr > 0 else 0.0, calibrated)
+            return float(calibrated)
+
+    return valid_atr if valid_atr > 0 else max((cur_px or 1.0) * 0.0020, 1e-6)
+
+
 def _raw_sl_tp(price: float, direction: str, df_5m: pd.DataFrame, df_1h: Optional[pd.DataFrame] = None) -> SlTpResult:
     """
     根据微观结构与支撑阻力位动态计算止损、止盈与盈亏比。
     """
     # 约定传入的 df_5m 已经是已收盘 K 线序列，不再重复剥离最后一行
     df_closed = df_5m
-    atr_5m = utils.atr(df_closed["high"], df_closed["low"], df_closed["close"], 14)
-    atr_val = atr_5m if (atr_5m is not None and math.isfinite(atr_5m) and atr_5m > 0) else max(price * 0.0015, 1e-4)
+    atr_val = calc_atr(df_closed, period=14, price=price)
 
     min_sl_dist = 0.8 * atr_val
     max_sl_dist = 2.5 * atr_val
@@ -1243,12 +1285,12 @@ def calculate_position_size(
 # 9. 持仓 FSM
 # ==========================================
 
-BREAK_EVEN_R = 1.0        # 浮盈达到 1.0R 启动保本
-BREAK_EVEN_MARGIN = 0.0015  # 保本滑点边际 0.05%
-TRAIL_START_R = 1.5       # 浮盈超过 1.5R 启动追踪
-TRAIL_ATR_MULT = 1.5      # 追踪止损回撤距离 = 1.5 x ATR14
-TIME_DECAY_BARS = 24      # 24 根 5m K 线 = 2 小时
-TIME_DECAY_MIN_R = 0.5    # 时间衰减的浮盈上限 (< 0.5R 才触发)
+BREAK_EVEN_R = 1.05       # 浮盈达到 1.05R 启动保本
+BREAK_EVEN_MARGIN = 0.0025  # 保本滑点边际 0.25% (覆盖双边 0.20% 摩擦并锁定 +0.05% 真实净利，杜绝假保本)
+TRAIL_START_R = 1.45      # 浮盈超过 1.45R 启动追踪 (留出 0.40R 阶梯空间)
+TRAIL_ATR_MULT = 1.5      # 追踪止损回撤距离基准 (由 TradingBot 加载配置动态覆写为 2.35)
+TIME_DECAY_BARS = 24      # 时间衰减基准根数 (由 TradingBot 加载配置动态覆写为 45 根/3.75h)
+TIME_DECAY_MIN_R = 0.5    # 时间衰减浮盈阈值基准 (由 TradingBot 加载配置动态覆写为 0.80R)
 
 
 @dataclass
@@ -1309,7 +1351,13 @@ class Position:
 
 
 def update_position_fsm(position: Position, current_price: float,
-                        current_atr: float) -> str:
+                        current_atr: float = 0.0,
+                        trail_atr_mult: Optional[float] = None,
+                        time_decay_bars: Optional[int] = None,
+                        time_decay_min_r: Optional[float] = None,
+                        break_even_r: Optional[float] = None,
+                        break_even_margin: Optional[float] = None,
+                        trail_start_r: Optional[float] = None) -> str:
     """
     每秒/每根 K 线刷新时调用。
     返回动作指令: "HOLD", "CLOSE_TP", "CLOSE_SL", "CLOSE_TIME_DECAY"
@@ -1324,6 +1372,14 @@ def update_position_fsm(position: Position, current_price: float,
     if not (math.isfinite(current_price) and current_price > 0):
         return "HOLD"
     valid_atr = float(current_atr) if (current_atr is not None and math.isfinite(current_atr) and current_atr > 0) else 0.0
+
+    # 参数动态对齐 (优先使用传入配置，缺省回退至模块基准常量)
+    t_atr_mult = trail_atr_mult if trail_atr_mult is not None else TRAIL_ATR_MULT
+    t_start_r = trail_start_r if trail_start_r is not None else TRAIL_START_R
+    td_bars = time_decay_bars if time_decay_bars is not None else TIME_DECAY_BARS
+    td_min_r = time_decay_min_r if time_decay_min_r is not None else TIME_DECAY_MIN_R
+    be_r = break_even_r if break_even_r is not None else BREAK_EVEN_R
+    be_margin = break_even_margin if break_even_margin is not None else BREAK_EVEN_MARGIN
 
     # 动态推进 bars_held，防止跨进程或丢帧导致有状态计数遗漏 (兼容 opened_at 为 float/datetime)
     if hasattr(position, "opened_at") and position.opened_at:
@@ -1349,21 +1405,22 @@ def update_position_fsm(position: Position, current_price: float,
             profit_r = 0.0
 
         # 3. 动态追踪止损 (优先判定，避免被保本逻辑覆盖)
-        if profit_r > TRAIL_START_R and valid_atr > 0:
-            trail = position.peak_price - TRAIL_ATR_MULT * valid_atr
+        if profit_r > t_start_r and valid_atr > 0:
+            trail = position.peak_price - t_atr_mult * valid_atr
             # 单向棘轮：严格只向上收紧，绝不回退，且不得已被现价击穿
             if (position.sl_price is None or trail > position.sl_price) and trail < current_price:
                 position.sl_price = trail
                 position.is_breakeven_set = True
-        # 4. 保本单: 浮盈 >= 1.0R (仅触发一次状态锁，且单向收紧，且不得已被现价击穿)
-        elif profit_r >= BREAK_EVEN_R and not getattr(position, "is_breakeven_set", False):
-            be = position.entry_price * (1.0 + BREAK_EVEN_MARGIN)
-            if (position.sl_price is None or be > position.sl_price) and be < current_price:
+        # 4. 保本单: 浮盈 >= be_r (仅触发一次状态锁，且单向收紧，且与现价保持安全距离防贴脸触发)
+        elif profit_r >= be_r and not getattr(position, "is_breakeven_set", False):
+            be = position.entry_price * (1.0 + be_margin)
+            safe_margin = max(0.10 * valid_atr, position.entry_price * 0.0005)
+            if (position.sl_price is None or be > position.sl_price) and (be + safe_margin < current_price):
                 position.sl_price = be
                 position.is_breakeven_set = True
 
-        # 5. 时间衰减平仓: 持仓 >= 24 根 5m K 线且浮盈 < 0.5R
-        if position.bars_held >= TIME_DECAY_BARS and profit_r < TIME_DECAY_MIN_R:
+        # 5. 时间衰减平仓: 持仓 >= td_bars 根 5m K 线且浮盈 < td_min_r
+        if position.bars_held >= td_bars and profit_r < td_min_r:
             return "CLOSE_TIME_DECAY"
 
         return "HOLD"
@@ -1381,21 +1438,22 @@ def update_position_fsm(position: Position, current_price: float,
         profit_r = 0.0
 
     # 3. 动态追踪止损 (优先判定)
-    if profit_r > TRAIL_START_R and valid_atr > 0:
-        trail = position.peak_price + TRAIL_ATR_MULT * valid_atr
+    if profit_r > t_start_r and valid_atr > 0:
+        trail = position.peak_price + t_atr_mult * valid_atr
         # 单向棘轮：做空严格只向下收紧，绝不回退，且不得已被现价击穿
         if (position.sl_price is None or trail < position.sl_price) and trail > current_price:
             position.sl_price = trail
             position.is_breakeven_set = True
-    # 4. 保本单: 浮盈 >= 1.0R
-    elif profit_r >= BREAK_EVEN_R and not getattr(position, "is_breakeven_set", False):
-        be = position.entry_price * (1.0 - BREAK_EVEN_MARGIN)
-        if (position.sl_price is None or be < position.sl_price) and be > current_price:
+    # 4. 保本单: 浮盈 >= be_r (对称空头安全距离保护)
+    elif profit_r >= be_r and not getattr(position, "is_breakeven_set", False):
+        be = position.entry_price * (1.0 - be_margin)
+        safe_margin = max(0.10 * valid_atr, position.entry_price * 0.0005)
+        if (position.sl_price is None or be < position.sl_price) and (be - safe_margin > current_price):
             position.sl_price = be
             position.is_breakeven_set = True
 
     # 5. 时间衰减平仓
-    if position.bars_held >= TIME_DECAY_BARS and profit_r < TIME_DECAY_MIN_R:
+    if position.bars_held >= td_bars and profit_r < td_min_r:
         return "CLOSE_TIME_DECAY"
 
     return "HOLD"

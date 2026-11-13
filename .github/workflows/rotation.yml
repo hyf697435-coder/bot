@@ -1,0 +1,169 @@
+name: 24/7 Trading Bot Cloud Rotation Ring
+
+on:
+  schedule:
+    # Trigger rotation every 6 hours: 00:00, 06:00, 12:00, 18:00 UTC
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      force_rotate:
+        description: 'Force immediate rotation regardless of shift runtime'
+        required: false
+        type: boolean
+        default: false
+      target_account:
+        description: 'Explicit destination node override (auto, account_a, account_b)'
+        required: false
+        type: choice
+        options:
+          - auto
+          - account_a
+          - account_b
+        default: auto
+      dry_run:
+        description: 'Dry run: validate connectivity & state without stopping active node'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: trading-bot-rotation-ring
+  cancel-in-progress: false
+
+jobs:
+  rotate:
+    name: Execute 6-Hour Proactive Shift Rotation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Instabox CLI & Controller Tools
+        run: |
+          echo ">>> Installing Instabox CLI..."
+          npm install -g instabox
+          instabox version
+          echo ">>> Installing Python dependencies..."
+          pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+          pip install httpx rich requests pydantic python-dotenv eth-account hyperliquid-python-sdk
+
+      - name: Verify Dual-Account Credentials & Nodes
+        env:
+          INSTABOX_API_KEY_A: ${{ secrets.INSTABOX_API_KEY_A }}
+          INSTABOX_API_KEY_B: ${{ secrets.INSTABOX_API_KEY_B }}
+        run: |
+          echo ">>> Validating Account A (INSTABOX_API_KEY_A)..."
+          if [ -z "${INSTABOX_API_KEY_A}" ]; then
+            echo "::error::Secret INSTABOX_API_KEY_A is not set!"
+            exit 1
+          fi
+          INSTABOX_API_KEY="${INSTABOX_API_KEY_A}" instabox whoami
+
+          echo ">>> Validating Account B (INSTABOX_API_KEY_B)..."
+          if [ -z "${INSTABOX_API_KEY_B}" ]; then
+            echo "::error::Secret INSTABOX_API_KEY_B is not set!"
+            exit 1
+          fi
+          INSTABOX_API_KEY="${INSTABOX_API_KEY_B}" instabox whoami
+
+      - name: Execute Handover Protocol
+        id: handover
+        env:
+          INSTABOX_API_KEY_A: ${{ secrets.INSTABOX_API_KEY_A }}
+          INSTABOX_API_KEY_B: ${{ secrets.INSTABOX_API_KEY_B }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          INPUT_FORCE: ${{ inputs.force_rotate }}
+          INPUT_TARGET: ${{ inputs.target_account }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          echo ">>> Executing scripts/rotator.py..."
+          CMD_ARGS=(
+            "--action" "handoff"
+            "--node-a" "bot-node-a"
+            "--node-b" "bot-node-b"
+            "--target" "${INPUT_TARGET:-auto}"
+          )
+
+          if [ "${INPUT_FORCE}" = "true" ]; then
+            CMD_ARGS+=("--force")
+          fi
+
+          if [ "${INPUT_DRY_RUN}" = "true" ]; then
+            CMD_ARGS+=("--dry-run")
+          fi
+
+          python scripts/rotator.py "${CMD_ARGS[@]}" 2>&1 | tee rotation_run.log
+
+      - name: Publish GitHub Step Summary
+        if: always()
+        run: |
+          STATUS="${{ steps.handover.outcome }}"
+          RUN_DATE=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+
+          cat <<EOF >> $GITHUB_STEP_SUMMARY
+          # 24/7 Trading Bot Rotation Report
+
+          - **Execution Timestamp**: ${RUN_DATE}
+          - **Trigger**: \`${{ github.event_name }}\`
+          - **Force Rotate**: \`${{ inputs.force_rotate || 'false' }}\`
+          - **Target Override**: \`${{ inputs.target_account || 'auto' }}\`
+          - **Dry Run**: \`${{ inputs.dry_run || 'false' }}\`
+          - **Outcome**: **${STATUS}**
+
+          ### Execution Logs
+          \`\`\`text
+          $(tail -n 40 rotation_run.log 2>/dev/null || echo "No execution log captured.")
+          \`\`\`
+          EOF
+
+      - name: Dispatch Telegram Failure Alert
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ -n "${TELEGRAM_BOT_TOKEN}" ] && [ -n "${TELEGRAM_CHAT_ID}" ]; then
+            RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            MSG="🚨 *[CRITICAL] Trading Bot Rotation FAILED!*
+          *Repository*: \`${{ github.repository }}\`
+          *Trigger*: \`${{ github.event_name }}\`
+          *Run*: [View Actions Log](${RUN_URL})
+          *Time*: \`$(date -u +"%Y-%m-%d %H:%M:%SZ")\`
+          Please check the active node state and investigate the failure."
+
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d "chat_id=${TELEGRAM_CHAT_ID}" \
+              -d "text=${MSG}" \
+              -d "parse_mode=Markdown" \
+              -d "disable_web_page_preview=true" || echo "Telegram notification failed."
+          else
+            echo "Telegram credentials not configured; skipping telegram alert."
+          fi
+
+      - name: Dispatch Webhook Failure Alert
+        if: failure()
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          if [ -n "${DISCORD_WEBHOOK_URL}" ]; then
+            RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            PAYLOAD=$(cat <<EOF
+          {
+            "content": "🚨 **[CRITICAL] Trading Bot Rotation Failed!**\nRun: ${RUN_URL}\nTime: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          }
+          EOF
+          )
+            curl -s -H "Content-Type: application/json" -X POST -d "${PAYLOAD}" "${DISCORD_WEBHOOK_URL}" || true
+          fi

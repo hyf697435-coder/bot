@@ -1,0 +1,87 @@
+diff --git a/main.py b/main.py
+--- a/main.py
++++ b/main.py
+@@ -31,6 +31,7 @@ from datetime import datetime, timedelta, timezone
+ from typing import Deque, Optional, Tuple
+ 
+ import numpy as np
++import pandas as pd
+ 
+ try:
+     from dotenv import load_dotenv
+@@ -107,6 +108,18 @@ TRADING_ALERT_THRESHOLD = _env_int("TRADING_ALERT_THRESHOLD", 2)  # 持仓期
+ CLOSE_FAIL_ALERT_THRESHOLD = _env_int("CLOSE_FAIL_ALERT_THRESHOLD", 5)  # 平仓连续失败保护阈值
+ 
++# ==========================================
++# 错误分类规则 (M1: 内部代码缺陷 vs 外部API/网络故障)
++# ==========================================
++INTERNAL_SOFTWARE_ERRORS = (
++    NameError,
++    TypeError,
++    AttributeError,
++    SyntaxError,
++    IndexError,
++    KeyError,
++    ZeroDivisionError,
++)
+ 
+ # 资金费率多空极化门槛 (年化等效)
+ FUNDING_EXTREME_LONG = 0.0003
+@@ -533,7 +546,19 @@ class TradingBot:
+             return
+ 
+         # 节点命中可观测性: 每个信号节点至少落一条 INFO, 并比对 5m K 线时间戳是否滚动
+-        current_candle_time = int(pd.to_numeric(df_5m["ts"].iloc[-1], errors='coerce'))
++        # 防御性提取时间戳: 容忍 pd 缺失、Series 异常、NaN、缺失索引等极端情况
++        current_candle_time = None
++        try:
++            ts_series = df_5m["ts"]
++            last_ts = ts_series.iloc[-1] if hasattr(ts_series, "iloc") else ts_series[-1]
++            if "pd" in globals() and hasattr(pd, "to_numeric"):
++                num_ts = pd.to_numeric(last_ts, errors="coerce")
++                if pd.notna(num_ts):
++                    current_candle_time = int(num_ts)
++            if current_candle_time is None:
++                current_candle_time = int(float(last_ts))
++        except (ValueError, TypeError, IndexError, KeyError, AttributeError) as ts_err:
++            logger.warning("[巡检] 5m K 线时间戳解析异常: %s | action=估算为当前系统时间戳", ts_err)
++            current_candle_time = int(now_ts * 1000)
++
+         logger.info("[巡检] 命中信号节点 | node=%s | candle_ts=%s | prev_candle=%s "
+                     "| action=执行信号 Pipeline",
+                     node, current_candle_time, self.last_node_candle_time)
+@@ -1462,10 +1487,27 @@ class TradingBot:
+     def _handle_loop_exception(self, e: Exception):
+-        """核心循环容错：持仓期连续异常触发保护兜底，空仓期指数退避。"""
++        """核心循环容错：持仓期连续异常触发保护兜底，空仓期指数退避。
++        严格区分内部软件缺陷与外部API网络故障，附带完整堆栈日志。"""
++        if isinstance(e, INTERNAL_SOFTWARE_ERRORS):
++            logger.critical(
++                "[交易程序运行时异常] 核心循环捕获内部代码缺陷 | err=%s: %s",
++                type(e).__name__, e, exc_info=True
++            )
++            send_alert(f"[交易程序运行时异常] 核心循环发生本地代码错误: {type(e).__name__}: {e}")
++            # 内部软件缺陷绝不增加 idle_api_error_count，避免误报为外部API连续异常
++            if self.state == STATE_TRADING:
++                self.api_error_count += 1
++                if self.api_error_count >= TRADING_ALERT_THRESHOLD:
++                    self._deploy_emergency_hard_stop()
++                self._safe_sleep(10, phase="TRADING_EXC_BACKOFF", step=1.0)
++            elif self.state == STATE_IDLE:
++                logger.warning("[巡检] 内部代码异常退避 | wait=%ss", min(self.idle_backoff, 60))
++                self._safe_sleep(min(self.idle_backoff, 60), phase="IDLE_BACKOFF", step=1.0)
++                self.idle_backoff = min(self.idle_backoff * 2, 600)
++            else:
++                self._safe_sleep(10, phase="LOOP_EXC_BACKOFF", step=1.0)
++            return
++
+         self.api_error_count += 1
+-        logger.error("[异常] 核心循环错误 | 计数=%s/%s | err=%s",
+-                     self.api_error_count, TRADING_ALERT_THRESHOLD, e)
++        logger.error(
++            "[异常] 核心循环错误 | 计数=%s/%s | err=%s",
++            self.api_error_count, TRADING_ALERT_THRESHOLD, e,
++            exc_info=True
++        )
+ 
+         if self.state == STATE_TRADING:
